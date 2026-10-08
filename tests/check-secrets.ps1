@@ -27,3 +27,5 @@ try {
     Write-Host 'PASS tracked secret/config/log guard and ignore rules'
 }
 finally { Pop-Location }
+# GitHub's pwsh wrapper propagates LASTEXITCODE; git grep uses 1 for a clean scan.
+exit 0
