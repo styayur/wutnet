@@ -15,7 +15,7 @@ Windows retains the single-file PowerShell 7 client, DPAPI and optional Task Sch
 | Windows 10/11 | PowerShell 7.2+ Core, root `whut-net.ps1` | DPAPI CurrentUser | Optional per-user Task Scheduler task |
 | Android 8+ | Native Kotlin, Views/XML and ViewBinding, `android/` | Android Keystore AES-256-GCM | Foreground network callbacks; compatible system sign-in entry point |
 
-Protocol semantics are documented in [docs/protocol.md](docs/protocol.md). No Windows authentication logic was changed for the Android MVP. MIT remains the first-party licence; see [third-party notices](THIRD_PARTY.md) for build tools and language/binding support.
+Protocol semantics are documented in [docs/protocol.md](docs/protocol.md). Windows v0.1.1 hardening is independent of the Android MVP; Android behavior is unchanged. MIT remains the first-party licence; see [third-party notices](THIRD_PARTY.md) for build tools and language/binding support.
 
 ## Android Quick Start
 
@@ -49,20 +49,20 @@ Passwords use an unexportable Android Keystore AES key and AES/GCM/NoPadding. Us
 
 See the [device/manual testing checklist](docs/android-testing.md) for cellular coexistence, network loss, credential storage and real system-entry verification. The most valuable next step is real WHUT field validation followed by device-side regression tests; a Quick Settings Tile remains a possible v0.2 addition.
 
-> **Status:** `v0.1.0-alpha.1` is an early, experimental release. Local configuration, PowerShell 7 execution, credential storage and Internet probing have been exercised, but the complete offline → captive portal → authentication → Internet recovery path should still be treated as experimental until field-tested against the current WHUT deployment.
+> **Windows status:** `v0.1.1` reliability/security candidate. Offline regression tests cover discovery, trust, protocol parsing, and credential POST handling. The complete offline → captive portal → authentication → Internet recovery path still requires a fresh WHUT field test. No stable Release is published by this change.
 
 ## Windows Features
 
 - Single-file PowerShell 7 implementation
 - No Python, browser extension, Docker, service or third-party PowerShell module
-- Dynamic captive-portal discovery
+- Bounded multi-probe captive-portal discovery
 - Dynamic `nasId` extraction
 - Dynamic API base-path discovery from the WHUT portal configuration
 - Cookie-aware CSRF session handling
 - Windows DPAPI `CurrentUser` password protection
 - Explicit proxy bypass for local portal traffic
 - Hard-coded WHUT portal host/path allowlist
-- Trusted physical Windows network-profile binding for automatic login
+- Trusted physical route/network fingerprint for automatic login
 - Optional Task Scheduler integration
 - No resident polling loop
 - Bounded local logging with no password, cookie or CSRF-token output
@@ -135,7 +135,7 @@ Only after manual testing succeeds should automatic login be enabled:
 
 | Command | Purpose |
 | --- | --- |
-| `setup [-Username <student-id>]` | Save the username, DPAPI-protected password and current trusted physical network profile |
+| `setup [-Username <student-id>]` | Save the username, DPAPI-protected password and current trusted physical route/network fingerprint (config v2) |
 | `status` | Check Internet and WHUT authentication state without logging in |
 | `login` | Authenticate once when required |
 | `auto` | Idempotent mode intended for Task Scheduler; exits immediately when already online |
@@ -177,7 +177,7 @@ Internet probe
                |
                v
       Validate trusted local
-        network profile
+      network fingerprint
                |
                v
        Decrypt DPAPI password
@@ -194,6 +194,55 @@ Internet probe
 
 The script does not keep a background daemon running. When automatic login is installed, Windows Task Scheduler invokes the script on user logon and network-connect events; the process exits after the check or authentication attempt completes.
 
+## Reliability
+
+Internet preflight tries the NCSI content identity and, independently on failure,
+NeverSSL's page identity (up to 4 seconds each). HTTP 200 by itself never means online.
+A successful identity check returns `InternetOnline`/exit 0 immediately. A redirect to
+an untrusted destination stops the operation without decrypting a password.
+
+If Internet is unavailable, portal discovery tries these endpoints in order:
+
+1. `http://www.msftconnecttest.com/redirect`
+2. `http://www.msftconnecttest.com/connecttest.txt`
+3. `http://neverssl.com/`
+4. `http://172.30.21.100/tpl/whut/login.html`
+
+Each request has its own 4-second timeout and discovery has a shared **16-second request
+budget** (preflight adds at most 8 seconds). A timeout/unavailable probe does not stop
+later probes. Proxy use and automatic redirects are disabled throughout. Every redirect
+must immediately match the WHUT host, default port and exact raw login path; arbitrary
+redirect chains are not followed. This intentionally refuses unrelated sign-in portals
+and external redirects even if another probe might have succeeded.
+
+Discovery distinguishes `InternetOnline`, `ProbeTimeout`, `PortalRedirectFound`,
+`WhutPortalReachable`, `PortalNotFound`, `PortalUnreachable`, and `UntrustedRedirect`.
+If all probes fail, any timeout takes precedence (31), then a failed direct WHUT
+connection/server error (30), otherwise not-found (11). Logs contain probe names and
+static outcomes, for example `probe=msft-redirect result=timeout state=ProbeTimeout`,
+`probe=msft-connecttest result=redirect`, and `portal=trusted result=PortalRedirectFound`.
+
+A direct HTTP 200 only establishes **reachability**. Bootstrap and status fingerprints
+must still pass. A direct login page without a session `nasId` permits diagnostics/status
+but cannot submit credentials; login returns 11 rather than inventing a session value.
+
+The single-file protocol adapter centralizes config/CSRF/status/login endpoints and
+known response codes in `WhutProtocol`. Config must contain one safe `host_url` relative
+API path. CSRF must be a JSON object with a nonblank string `csrf_token`; status requires
+an integer `code`; login requires integer `code` plus string `msg`. Duplicate JSON keys,
+malformed bodies, or changed shapes produce `UnsupportedProtocol`/`ProtocolChanged` (13),
+not authentication rejection (20). Raw server messages are never displayed or logged.
+
+If config is missing, unavailable or cannot be parsed, `/api` is accepted **only after
+an active CSRF schema check**; status is subsequently checked before login. Failed fallback
+validation returns 13. An explicitly unsafe or ambiguous config is rejected immediately.
+API bases allow only nonempty ASCII path segments, such as `/api` or `/eportal/api`;
+absolute URLs, `//`, `..`, backslashes, percent escapes, queries and fragments are rejected.
+
+The [trusted network fingerprint](#trusted-network-fingerprint) adds a separate check
+immediately before decryption. Login success still requires both account-online status
+and Internet recovery after the POST.
+
 ## Security Model
 
 WHUT-Net deliberately keeps the trust boundary narrow.
@@ -208,7 +257,7 @@ The password is stored under:
 
 PowerShell's `ConvertFrom-SecureString` uses Windows DPAPI for the current Windows user. Another Windows account cannot normally decrypt the stored value.
 
-The username and trusted Windows network-profile names are stored separately in:
+The username and trusted network fingerprint are stored separately in:
 
 ```text
 %LOCALAPPDATA%\WHUT-Net\config.json
@@ -220,17 +269,40 @@ Credentials are only submitted after the discovered captive portal matches the e
 
 Dynamic values such as `nasId` may change between sessions, but the authentication destination is not accepted from an arbitrary redirect.
 
-### Trusted local network profile
+### Trusted network fingerprint
 
-Automatic login additionally requires a physical Windows network profile captured during `setup`.
+`setup` writes config version 2. It records the physical interface selected by Windows'
+route to `172.30.21.100`, its alias and interface type (Windows IANA numeric type),
+IPv4 address and actual CIDR prefix, default gateway, portal host, and the profile name
+when available. It does not infer a fixed `/16` or scan SSIDs. If a complete physical
+route cannot be captured, setup stores no trusted fingerprint and asks for setup again.
 
-This is a defence-in-depth check, not cryptographic server authentication.
+Before decrypting a credential, `auto` requires an active physical route plus matching
+portal host, IPv4 prefix, gateway, interface alias and type. DHCP address changes within
+the prefix and Windows profile-name suffix changes are tolerated. The profile name is
+auxiliary information, never sufficient authority to send credentials. `login` allows
+an interface alias/type change but still requires matching prefix, gateway and portal
+host for v2 configurations. Both modes require the exact portal host/path allowlist.
 
-### HTTP limitation
+Version 1 `trustedProfiles` configurations remain readable and are never silently
+rewritten. Manual login can use v1 with an active physical route and the portal/protocol
+checks. `auto` and `install` require rerunning `setup` on WHUT to save a v2 fingerprint.
+Adapter renames, campus subnet/gateway changes, or routing through a virtual adapter
+can require setup again. Multiple active networks are not pooled into one trust match.
 
-The current WHUT captive portal uses HTTP.
+### Security limitations
 
-DPAPI protects the password **at rest**, but WHUT-Net cannot provide transport encryption that the upstream portal itself does not support. Users should understand this limitation before enabling unattended authentication.
+- The current WHUT Portal uses **HTTP**. Credentials and session data lack transport encryption.
+- Windows DPAPI `CurrentUser` protects the credential **at rest** only.
+- PowerShell/.NET immutable strings cannot be guaranteed to be immediately cleared from
+  memory. The credential-specific POST path avoids explicitly creating a plaintext
+  password string: it converts SecureString → BSTR → mutable UTF-8 buffers, form-encodes
+  them, then clears owned buffers and disposes the SecureString/BSTR/request promptly,
+  including on failure. Runtime/HTTP-stack copies and debugging cannot be controlled
+  completely. This reduces exposure; it is **not absolute memory erasure**.
+- Network/protocol fingerprints are defence-in-depth, **not cryptographic server
+  authentication**. HTTP content checks can also be spoofed. Windows routing can change
+  after the last trust check; this client does not bind a socket to a physical interface.
 
 ### Logging
 
@@ -291,12 +363,14 @@ To remove the task and local WHUT-Net data:
 | ---: | --- |
 | `0` | Online or authentication succeeded |
 | `10` | WHUT portal reached; account offline |
-| `11` | WHUT portal not discovered or `nasId` missing |
-| `12` | Untrusted portal, network profile or unsafe API path |
-| `20` | Authentication failed |
+| `11` | `PortalNotFound` or valid session `nasId` missing |
+| `12` | `UntrustedRedirect`, untrusted network fingerprint or unsafe API path |
+| `13` | `UnsupportedProtocol` / `ProtocolChanged` |
+| `20` | Authentication explicitly rejected by WHUT |
 | `21` | Additional verification/code check required |
-| `22` | CSRF acquisition failed |
-| `30` | WHUT portal/API unavailable |
+| `22` | CSRF/bootstrap request failed (shape changes use 13) |
+| `30` | `PortalUnreachable` or WHUT API unavailable |
+| `31` | Discovery exhausted after one or more `ProbeTimeout` results |
 | `40` | Network failure or post-authentication Internet verification failure |
 | `50` | Local configuration or credential error |
 
@@ -332,7 +406,7 @@ Unblock-File .\whut-net.ps1
 
 ### Diagnose reports `Internet: OK`
 
-This means the machine already has Internet access, so WHUT-Net intentionally does not contact the captive portal.
+This means an Internet content-identity probe succeeded, so WHUT-Net returns without authenticating.
 
 To validate the complete authentication flow, test during a genuine unauthenticated WHUT session.
 
@@ -341,6 +415,26 @@ To validate the complete authentication flow, test during a genuine unauthentica
 ```powershell
 Get-Content "$env:LOCALAPPDATA\WHUT-Net\whut-net.log" -Tail 50
 ```
+
+## Windows validation
+
+Run the dependency-free offline suite in PowerShell 7 on Windows:
+
+```powershell
+pwsh -NoLogo -NoProfile -File .\tests\windows.tests.ps1
+pwsh -NoLogo -NoProfile -File .\tests\check-secrets.ps1
+```
+
+The suite calls `Parser::ParseFile` and mocks network/credential inputs. It exercises
+allowlists, timeout continuation, untrusted redirects, protocol changes, fallback,
+config v1 compatibility, route fingerprints, UTF-8 form encoding, and owned-buffer
+cleanup on POST success/failure. Tests never submit a real campus credential. Windows CI
+runs syntax checks, these tests, and a lightweight scan for accidentally tracked local
+credentials, DPAPI blobs, private keys and GitHub tokens; it is not an exhaustive secret scanner.
+
+Field testing remains required for real redirects/`nasId`, the current portal response
+shapes/cookies, DHCP/profile changes, scheduled auto-login, and complete offline → online
+authentication. See the [v0.1.1 release-notes draft](docs/releases/v0.1.1.md).
 
 ## Project Scope
 

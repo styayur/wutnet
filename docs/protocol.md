@@ -6,9 +6,10 @@ specification. Full captive-session field validation remains pending on both pla
 
 ## Discovery and trust
 
-Windows uses a direct Internet identity probe (`Microsoft Connect Test`, with a
-NeverSSL page-identity fallback), then discovers an HTTP redirect from
-`http://neverssl.com/`. Android first inspects the **selected Wi-Fi Network's**
+Windows v0.1.1 uses independent Internet content-identity probes, then bounded
+NCSI redirect → NCSI content → NeverSSL → direct WHUT discovery (4 seconds each,
+16-second discovery budget). It distinguishes online, trusted redirect, direct
+reachability, timeout, not-found, unreachable and untrusted redirect outcomes. Android first inspects the **selected Wi-Fi Network's**
 `VALIDATED` / `CAPTIVE_PORTAL` capabilities; neither the cellular default route nor
 HTTP 200 alone establishes Internet connectivity. Without a captive flag or validated
 capability, a network-bound HTTPS 204 probe is a fallback.
@@ -16,7 +17,7 @@ capability, a network-bound HTTPS 204 probe is a fallback.
 Android accepts a system portal URL only as an untrusted hint, or reads one redirect
 from the NeverSSL probe. It never follows an arbitrary external redirect. Android
 rejects probe-relative redirects that do not immediately resolve to the exact WHUT
-portal. Windows additionally permits bounded same-host discovery redirects.
+portal. Windows also rejects redirects unless they immediately match its portal allowlist.
 
 The observed WHUT portal is:
 
@@ -27,8 +28,10 @@ http://172.30.21.100/tpl/whut/login.html?nasId=<session-specific-value>
 Android requires HTTP, host exactly `172.30.21.100`, default port or 80, no userinfo,
 no fragment, and raw path exactly `/tpl/whut/login.html`. It rejects suffix hostnames,
 other private IPs, encoded/normalised lookalike paths, HTTPS hints, and alternate ports.
-Windows retains its existing allowlist (HTTP/HTTPS default ports and its existing
-path comparison). No Windows code was changed for the Android MVP.
+Windows accepts HTTP/HTTPS default ports, exact host and raw login path, no userinfo
+or fragment, and rejects normalized/encoded path lookalikes. Windows automatic login
+also requires the v2 physical route, prefix, gateway and interface fingerprint; profile
+names are auxiliary. Manual v1 configuration support does not authorize auto-login.
 
 `nasId` is discovered anew for each operation, URL-decoded, and submitted as a login
 field. Android requires exactly one nonblank value, limits its length, and rejects
@@ -46,9 +49,10 @@ diagnostics may show it locally. Do not upload diagnostic dumps containing local
 Android requires an unambiguous `host_url` assignment. A base is an ASCII absolute
 path containing segment characters `[A-Za-z0-9._~-]`; `..`, `//`, percent escapes,
 backslashes, queries, fragments, scheme/host and root-only paths are rejected.
-Missing config structure fails closed. Windows preserves its existing `/api` fallback
-when config discovery fails. This deliberate Android tightening affects discovery,
-not the meaning of any authentication field.
+Missing config structure fails closed on Android. Windows accepts `/api` fallback
+only after actively validating its CSRF JSON shape, and validates status before releasing
+a credential. Unsafe or ambiguous config never enables fallback. Windows reports
+protocol errors as exit 13, independently of authentication rejection.
 
 Android maintains a per-operation Java `CookieManager` accepting only original-server
 cookies. There is no global CookieHandler. Each portal request sends appropriate
@@ -89,7 +93,9 @@ origin, with the preceding headers plus `Origin: http://172.30.21.100` and
 | `captchaId` | Empty string |
 
 HTTP 200 is insufficient. The login JSON must contain numeric `code == 0`; nonzero
-codes fail, including code 2 (additional verification may be required). Android v0.1
+codes fail, including code 2 (additional verification may be required). Windows additionally
+requires a string `msg` but never logs or returns its raw content; malformed login/status/CSRF
+shapes and duplicate keys are protocol changes, not bad-password errors. Android v0.1
 does not solve CAPTCHAs or bypass verification.
 
 ## Success and Internet verification
