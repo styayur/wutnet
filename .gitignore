@@ -9,3 +9,15 @@ config.json
 .idea/
 Thumbs.db
 Desktop.ini
+
+# Android SDK locations, generated output and signing material
+local.properties
+**/.gradle/
+**/.kotlin/
+**/build/
+*.apk
+*.aab
+*.jks
+*.keystore
+*.hprof
+captures/
