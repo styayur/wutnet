@@ -1,0 +1,11 @@
+# Local credentials, configuration and logs
+credential.dat
+config.json
+*.log
+*.log.*
+
+# Editor and Windows state
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
