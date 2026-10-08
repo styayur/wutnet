@@ -24,7 +24,7 @@ jobs:
             android/**/*.gradle.kts
             android/gradle/wrapper/gradle-wrapper.properties
       - name: Install Android SDK packages
-        run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
+        run: bash ci/install-sdk.sh
       - name: Unit tests
         run: ./gradlew test --console=plain
       - name: Lint
