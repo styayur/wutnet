@@ -1,0 +1,40 @@
+name: Architecture documentation
+on:
+  pull_request:
+    paths:
+      - 'README.md'
+      - 'docs/**'
+      - '.github/workflows/architecture.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'README.md'
+      - 'docs/**'
+      - '.github/workflows/architecture.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check source anchors, references and repeatable Mermaid rendering
+        run: python docs/architecture/verify.py --render --chrome "C:/Program Files/Google/Chrome/Application/chrome.exe"
+      - name: Parse PowerShell and exercise credential-free help
+        shell: pwsh
+        run: |
+          $parseErrors = $null
+          [void][Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'whut-net.ps1'), [ref]$null, [ref]$parseErrors)
+          if ($parseErrors) { throw 'PowerShell syntax errors' }
+          $output = pwsh -NoProfile -File ./whut-net.ps1 help
+          if ($LASTEXITCODE -ne 0 -or ($output -join "`n") -notmatch 'WHUT-Net v0.1.0-alpha.1') { throw 'Help command failed' }
