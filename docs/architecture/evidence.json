@@ -1,0 +1,19 @@
+{
+  "source_commit": "5b18ed5662041fc254e9ca5c13de9280548578ca",
+  "reviewed_on": "2026-10-09",
+  "diagram_source": "README.md",
+  "sources": [
+    {
+      "path": "whut-net.ps1",
+      "anchors": [
+        "function Test-Internet",
+        "function Resolve-PortalSession",
+        "function Test-TrustedLocalNetwork",
+        "function Read-ProtectedPassword",
+        "function Invoke-LoginCommand",
+        "Start-Sleep -Milliseconds 750",
+        "function Install-WhutScheduledTask"
+      ]
+    }
+  ]
+}

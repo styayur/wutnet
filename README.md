@@ -10,6 +10,26 @@ WHUT-Net is designed to replace repeated browser-based campus-network login with
 
 > **Status:** `v0.1.0-alpha.1` is an early, experimental release. Local configuration, PowerShell 7 execution, credential storage and Internet probing have been exercised, but the complete offline → captive portal → authentication → Internet recovery path should still be treated as experimental until field-tested against the current WHUT deployment.
 
+## 无凭据命令演示
+
+```powershell
+pwsh -NoProfile -File ./whut-net.ps1 help
+```
+
+2026-10-09 在 Windows 实际运行，exit 0，输出开头：
+
+```text
+WHUT-Net v0.1.0-alpha.1
+
+Usage:
+  .\whut-net.ps1 setup [-Username <student-id>]
+  .\whut-net.ps1 status
+  .\whut-net.ps1 login
+  .\whut-net.ps1 auto
+```
+
+这是命令入口验证；未使用校园账号，未执行 setup/login/install，不代表校园网认证成功。实际认证需要受信任的校园网络，现有安装和安全说明继续适用。
+
 ## Features
 
 - Single-file PowerShell 7 implementation
@@ -319,6 +339,32 @@ Features such as GUI management, multi-account rotation, bandwidth monitoring, g
 This is an unofficial community project and is not affiliated with, endorsed by, or maintained by Wuhan University of Technology.
 
 Campus-network infrastructure and authentication APIs may change without notice. Use the script only with an account and network access you are authorised to use.
+
+## Architecture
+
+<!-- architecture:overview:start -->
+```mermaid
+flowchart TD
+  Start[login / auto command] --> Probe{Internet probe succeeds?}
+  Probe -->|yes| Done[Exit 0: online]
+  Probe -->|no| Portal[Discover allowlisted WHUT portal]
+  Portal --> Session[Cookie session / API path / CSRF]
+  Session --> Status{Account already online?}
+  Status -->|yes| Verify[Verify Internet connectivity]
+  Status -->|no| Trust[Validate physical network profile]
+  Store[(Local config / DPAPI password)] --> Trust
+  Trust --> Login[Portal login request]
+  Login --> Check[Wait 750 ms; verify account status]
+  Check --> Verify --> Result[Exit code / redacted log]
+  Scheduler[Optional Task Scheduler: logon / network event] -.-> Start
+```
+<!-- architecture:overview:end -->
+
+本图只描述远端主分支的 Windows PowerShell 客户端，不包含其他分支的 Android 实现。所有网络调用由 `whut-net.ps1` 发起；配置和 DPAPI 密码保存在当前用户本地目录。凭据发送前检查 Portal allowlist 和 Windows 物理网络配置。
+
+Portal 当前使用 HTTP，DPAPI 只保护本地密码，不能提供传输加密。登录接口返回后还需核对账号状态和实际联网结果。当前源码没有自动重试循环或退避模块：失败返回明确 exit code；后续重试来自用户再次调用，或已安装任务的下一次登录/联网事件。不得把一次 750 ms 等待画成重试机制。
+
+[Source evidence and diagram verification](docs/architecture/README.md).
 
 ## License
 
