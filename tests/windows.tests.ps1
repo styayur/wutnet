@@ -71,17 +71,17 @@ Test-Case 'timeouts on Microsoft probes allow NeverSSL trusted redirect' {
     Assert-Equal $script:calls 3
     Assert-True ($script:messages -contains 'probe=msft-redirect result=timeout state=ProbeTimeout')
 }
-Test-Case 'untrusted first redirect stops immediately without credential reads' {
+Test-Case 'foreign redirects are ignored without following them or reading credentials' {
     $script:calls = 0
     function Invoke-HttpText { $script:calls++; Response 302 '' ([Uri]'http://evil.example/') }
     function Read-ProtectedPassword { throw 'Credential read must never occur' }
     function Test-Internet { $false }
-    Assert-Code { Invoke-LoginCommand -Automatic } 12
-    Assert-Equal $script:calls 1
+    Assert-Code { Invoke-LoginCommand -Automatic } 11
+    Assert-Equal $script:calls 4
 }
 Test-Case 'relative redirect normalization cannot bypass allowlist' {
     function Invoke-HttpText { Response 302 '' '/x/../tpl/whut/login.html' }
-    Assert-Equal (Find-WhutPortal).State 'UntrustedRedirect'
+    Assert-Equal (Find-WhutPortal).State 'ProtocolChanged'
 }
 Test-Case 'known Internet content ends discovery early' {
     $script:calls = 0
@@ -153,7 +153,7 @@ Test-Case 'config API path and actively validated fallback' {
     Assert-Equal (Get-ApiBasePath $null $portal) '/eportal/api'
     function Invoke-HttpText { Response 200 "var host_url = '//evil.example/api';" }
     Assert-Code { Get-ApiBasePath $null $portal } 12
-    function Invoke-HttpText { Response 200 "host_url = '/api'; host_url = '/other';" }
+    function Invoke-HttpText { Response 200 "var host_url = '/api';`nvar host_url = '/other';" }
     Assert-Code { Get-ApiBasePath $null $portal } 13
     function Invoke-HttpText { param($Context,$Method,$Uri) if ($Uri.AbsolutePath.EndsWith('config.js')) { Response 404 } else { Response 200 '{"csrf_token":"synthetic"}' } }
     Assert-Equal (Get-ApiBasePath $null $portal) '/api'
@@ -206,7 +206,7 @@ Test-Case 'v1 config reads without mutation; auto requires upgrade' {
 }
 Test-Case 'malformed bootstrap never reads credential' {
     function Test-Internet { $false }
-    function Find-WhutPortal { [pscustomobject]@{State='PortalRedirectFound';ExitCode=0;Portal=$portal} }
+    function Find-WhutPortal { [pscustomobject]@{State='PortalRedirectFound';ExitCode=0;Portal=$portal;NasId=$null;UserIpHint=$null;Bootstrap=$null} }
     function Start-WhutSession { [pscustomobject]@{Client=$null} }
     function Invoke-HttpText { Response 200 '{}' }
     function Read-ProtectedPassword { throw 'Credential read must never occur' }
@@ -220,12 +220,12 @@ Test-Case 'Internet online never reads config or credentials' {
 }
 Test-Case 'status fingerprint is required before credential release' {
     function Test-Internet { $false }
-    function Find-WhutPortal { [pscustomobject]@{State='PortalRedirectFound';ExitCode=0;Portal=$portal} }
+    function Find-WhutPortal { [pscustomobject]@{State='PortalRedirectFound';ExitCode=0;Portal=$portal;NasId=$null;UserIpHint=$null;Bootstrap=$null} }
     function Start-WhutSession { [pscustomobject]@{Client=$null} }
     function Invoke-HttpText {
         param($Context,$Method,$Uri)
         switch -Wildcard ($Uri.AbsolutePath) {
-            '*config.js' { Response 200 "host_url = '/api';" }
+            '*config.js' { Response 200 "var host_url = '/api';" }
             '*csrf-token' { Response 200 '{"csrf_token":"synthetic"}' }
             default { Response 200 '{"status":"offline"}' }
         }
@@ -239,7 +239,7 @@ Test-Case 'login command requires both account and Internet verification' {
     $script:postCalls = 0
     function Test-Internet { $script:internetCalls++; return ($script:internetCalls -gt 1) }
     function Resolve-PortalSession {
-        [pscustomobject]@{Session=$null;Portal=$portal;ApiBasePath='/api';CsrfToken='synthetic';NasId='test-session'}
+        [pscustomobject]@{Session=$null;Portal=$portal;ApiBasePath='/api';CsrfToken='synthetic';NasId='test-session';UserIpHint=$null}
     }
     function Get-WhutAccountStatus {
         $script:statusCalls++
@@ -362,30 +362,170 @@ Test-Case 'production HTTP context disables proxies and automatic redirects' {
     }
     finally { $context.Client.Dispose() }
 }
-Test-Case 'untrusted Internet preflight redirect is not ignored' {
+Test-Case 'foreign Internet preflight redirects continue without establishing trust' {
     function Invoke-HttpText { Response 302 '' 'http://evil.example/' }
-    Assert-Code { Test-Internet } 12
+    Assert-True (-not (Test-Internet))
 }
-Test-Case 'Windows route fingerprint selects the actual physical interface' {
-    function Find-NetRoute {
-        [pscustomobject]@{IPAddress='10.91.4.5';PrefixLength=16;InterfaceIndex=7}
-        [pscustomobject]@{NextHop='10.91.0.1';InterfaceIndex=7}
-    }
+Test-Case 'physical WLAN selection ignores Meta routing and excludes benchmark/APIPA addresses' {
+    function Find-NetRoute { throw 'Route lookup must not select the fingerprint' }
     function Get-NetAdapter {
-        [pscustomobject]@{ifIndex=3;Status='Up';Name='Other';InterfaceType=6}
-        [pscustomobject]@{ifIndex=7;Status='Up';Name='Wi-Fi';InterfaceType=71}
+        param([switch]$Physical)
+        Assert-True $Physical
+        [pscustomobject]@{ifIndex=3;Status='Up';Name='Meta';InterfaceType=6}
+        [pscustomobject]@{ifIndex=7;Status='Up';Name='WLAN';InterfaceType=71}
     }
     function Get-NetIPConfiguration {
-        [pscustomobject]@{IPv4DefaultGateway=@([pscustomobject]@{NextHop='10.91.0.1'})}
+        param($InterfaceIndex)
+        if ($InterfaceIndex -eq 3) {
+            [pscustomobject]@{IPv4DefaultGateway=@([pscustomobject]@{NextHop='198.18.0.2'});
+                IPv4Address=@([pscustomobject]@{IPAddress='198.18.0.1';PrefixLength=15})}
+        } else {
+            [pscustomobject]@{IPv4DefaultGateway=@([pscustomobject]@{NextHop='10.82.0.1'});
+                IPv4Address=@([pscustomobject]@{IPAddress='10.82.155.225';PrefixLength=15})}
+        }
     }
+    function Get-NetRoute { [pscustomobject]@{DestinationPrefix='0.0.0.0/0';RouteMetric=10} }
+    function Get-NetIPInterface { [pscustomobject]@{InterfaceMetric=5} }
     function Get-NetConnectionProfile { [pscustomobject]@{Name='WHUT-DORM 3'} }
-    $network = Get-CurrentNetworkFingerprint
-    Assert-Equal $network.interfaceAlias 'Wi-Fi'
+    $network = Get-CurrentNetworkFingerprint -UserIpHint '10.82.155.225'
+    Assert-Equal $network.interfaceAlias 'WLAN'
     Assert-Equal $network.interfaceType '71'
-    Assert-Equal $network.ipv4Prefix '10.91.0.0/16'
+    Assert-Equal $network.ipv4Prefix '10.82.0.0/15'
     Assert-Equal $network.profileName 'WHUT-DORM 3'
-    function Get-NetAdapter { [pscustomobject]@{ifIndex=3;Status='Up';Name='Other';InterfaceType=6} }
+    Assert-Equal (Get-CurrentNetworkFingerprint -UserIpHint '10.91.175.52') $null
+    foreach ($bad in @('169.254.1.2','198.18.0.1','198.19.255.254','127.0.0.1','::1')) {
+        Assert-True (-not (Test-UsablePhysicalIPv4 $bad))
+    }
+    function Get-NetAdapter { [pscustomobject]@{ifIndex=3;Status='Up';Name='Meta';InterfaceType=6} }
     Assert-Equal (Get-CurrentNetworkFingerprint) $null
+}
+Test-Case 'config comments are excluded and duplicate active values are deduplicated' {
+    function Invoke-HttpText { Response 200 "//var host_url = 'http://192.168.85.20/api'`nvar host_url = '/api'" }
+    Assert-Equal (Get-ApiBasePath $null $portal) '/api'
+    function Invoke-HttpText { Response 200 "var host_url = '/api'`nconst host_url = '/api'" }
+    Assert-Equal (Get-ApiBasePath $null $portal) '/api'
+    function Invoke-HttpText { Response 200 "/*`nvar host_url = '/test'`n*/`nlet host_url = '/api'" }
+    Assert-Equal (Get-ApiBasePath $null $portal) '/api'
+    function Invoke-HttpText { Response 200 "var host_url = '/api'`nvar host_url = '/api2'" }
+    Assert-Code { Get-ApiBasePath $null $portal } 13
+    function Invoke-HttpText { Response 200 "var host_url = '/api'`nvar host_url = '/API'" }
+    Assert-Code { Get-ApiBasePath $null $portal } 13
+}
+# Historical private DHCP examples supplied by the maintainer; no account/credential data.
+$fieldBootstraps = @(
+    @{NasId='52';UserIp='10.82.155.225';AcIp='172.30.1.223';AcName='WHUT-Bras-ME60-A'},
+    @{NasId='59';UserIp='10.91.175.52';AcIp='172.30.1.220';AcName='WHUT-YQ-Bras-ME60'},
+    @{NasId='731';UserIp='10.90.24.17';AcIp='172.30.2.19';AcName='SYNTHETIC-BRAS'}
+)
+Test-Case 'cross-campus bootstrap metadata and canonical portal remain dynamic' {
+    foreach ($case in $fieldBootstraps) {
+        $uri = [Uri]("http://172.30.21.100/api/r/{0}?userip={1}&wlanacname=&acip={2}&acname={3}" -f
+            $case.NasId,$case.UserIp,$case.AcIp,$case.AcName)
+        Assert-True (Test-TrustedBootstrapUri $uri)
+        $meta = Get-WhutBootstrapMetadata $uri
+        Assert-Equal $meta.NasId $case.NasId
+        Assert-Equal $meta.UserIp $case.UserIp
+        Assert-Equal $meta.AcIp $case.AcIp
+        Assert-Equal $meta.AcName $case.AcName
+        Assert-Equal $meta.WlanAcName ''
+        $canonical = Convert-BootstrapToPortalUri $uri
+        Assert-True (Test-TrustedPortalUri $canonical)
+        Assert-Equal (Get-QueryValue $canonical 'nasId') $case.NasId
+        Assert-Equal (Get-QueryValue $canonical 'userip') $case.UserIp
+    }
+}
+Test-Case 'bootstrap allowlist rejects foreign hosts and raw-path lookalikes' {
+    foreach ($bad in @('http://172.30.21.101/api/r/52','http://172.30.21.100.evil.example/api/r/52',
+        'https://172.30.21.100/api/r/52','http://172.30.21.100:8080/api/r/52',
+        'http://user@172.30.21.100/api/r/52','http://172.30.21.100/api/r/52#x',
+        'http://172.30.21.100/api/x/../r/52','http://172.30.21.100/api/r/%35%32',
+        'http://172.30.21.100/api/r/12345678901','http://172.30.21.100/api/r/x',
+        'http://172.30.21.100/api/r/52/','http://172.30.21.100/api/account/login')) {
+        Assert-True (-not (Test-TrustedBootstrapUri ([Uri]$bad))) 'Unsafe bootstrap accepted'
+    }
+}
+Test-Case 'foreign discovery redirect is skipped then trusted bootstrap succeeds' {
+    $script:calls = 0
+    function Invoke-HttpText {
+        param($Context,$Method,$Uri)
+        $script:calls++
+        Assert-True ($Uri.Host -ne 'evil.example')
+        if ($script:calls -eq 1) { Response 302 '' 'http://evil.example/' }
+        else { Response 302 '' 'http://172.30.21.100/api/r/52?userip=10.82.155.225' }
+    }
+    $found = Find-WhutPortal
+    Assert-Equal $found.State 'WhutBootstrapFound'
+    Assert-Equal $found.NasId '52'
+    Assert-Equal $script:calls 2
+}
+Test-Case 'unknown WHUT destinations and malformed bootstrap metadata are protocol errors' {
+    function Invoke-HttpText { Response 302 '' 'http://172.30.21.100/unknown' }
+    Assert-Equal (Find-WhutPortal).ExitCode 13
+    Assert-Code { Test-Internet } 13
+    function Invoke-HttpText { Response 302 '' 'http://172.30.21.100/api/r/52?userip=invalid' }
+    Assert-Code { Find-WhutPortal } 13
+}
+Test-Case 'bootstrap replay uses one context before opening canonical page' {
+    $bootstrap = [Uri]'http://172.30.21.100/api/r/52?userip=10.82.155.225'
+    $canonical = Convert-BootstrapToPortalUri $bootstrap
+    $script:replayCalls = [Collections.Generic.List[object]]::new()
+    function Invoke-HttpText {
+        param($Context,$Method,$Uri)
+        $script:replayCalls.Add([pscustomobject]@{Context=$Context;Uri=$Uri})
+        if ($script:replayCalls.Count -eq 1) { Response 302 '' '/tpl/whut/login.html?nasId=52' }
+        else { Response 200 'portal' }
+    }
+    $context = Start-WhutSession $canonical $bootstrap
+    Assert-Equal $script:replayCalls.Count 2
+    Assert-Equal $script:replayCalls[0].Uri $bootstrap
+    Assert-Equal $script:replayCalls[1].Uri $canonical
+    Assert-True ([object]::ReferenceEquals($script:replayCalls[0].Context,$script:replayCalls[1].Context))
+    function Invoke-HttpText { Response 302 '' '/x/../tpl/whut/login.html' }
+    Assert-Code { Start-WhutSession $canonical $bootstrap } 13
+    function Invoke-HttpText { Response 302 '' 'http://evil.example/' }
+    Assert-Code { Start-WhutSession $canonical $bootstrap } 13
+}
+Test-Case 'pwsh resolver prefers stable Store alias and returns System.String' {
+    $aliasPath = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\pwsh.exe'
+    function Test-Path { param($LiteralPath,$PathType) $LiteralPath -eq $aliasPath }
+    function Get-Command { throw 'Must not enumerate multiple Store executables when alias exists' }
+    $actual = Resolve-PwshExecutable
+    Assert-True ($actual -is [string])
+    Assert-Equal $actual $aliasPath
+}
+Test-Case 'pwsh resolver falls back to PSHOME then a unique safe application' {
+    function Test-Path { param($LiteralPath,$PathType) $LiteralPath -eq (Join-Path $PSHOME 'pwsh.exe') }
+    Assert-Equal (Resolve-PwshExecutable) (Join-Path $PSHOME 'pwsh.exe')
+    function Test-Path { param($LiteralPath,$PathType) $LiteralPath -in @('C:\Tools\pwsh.exe','C:\Other\pwsh.exe') }
+    function Get-Command {
+        [pscustomobject]@{Source='C:\Tools\pwsh.exe'}
+        [pscustomobject]@{Source='C:\Tools\pwsh.exe'}
+    }
+    $actual = Resolve-PwshExecutable
+    Assert-True ($actual -is [string])
+    Assert-Equal $actual 'C:\Tools\pwsh.exe'
+    function Get-Command {
+        [pscustomobject]@{Source='C:\Tools\pwsh.exe'}
+        [pscustomobject]@{Source='C:\Other\pwsh.exe'}
+    }
+    Assert-Code { Resolve-PwshExecutable } 50
+}
+Test-Case 'scheduled task action contains scalar Execute, quoted script, and working directory' {
+    function Resolve-PwshExecutable { [string]'C:\Users\Synthetic\AppData\Local\Microsoft\WindowsApps\pwsh.exe' }
+    function Test-Path { $true }
+    $spec = New-WhutTaskActionSpec 'C:\Synthetic Folder\whut-net.ps1'
+    Assert-True ($spec.Execute -is [string])
+    Assert-Equal $spec.Execute 'C:\Users\Synthetic\AppData\Local\Microsoft\WindowsApps\pwsh.exe'
+    Assert-Equal $spec.Arguments '-NoLogo -NoProfile -NonInteractive -File "C:\Synthetic Folder\whut-net.ps1" auto'
+    Assert-Equal $spec.WorkingDirectory 'C:\Synthetic Folder'
+    Assert-True (($spec | ConvertTo-Json) -notmatch 'String\[\]')
+}
+Test-Case 'release version and bootstrap log redaction' {
+    Assert-Equal $Script:Version '1.3.2'
+    $logs = $script:messages -join "`n"
+    foreach ($secret in @('10.82.155.225','10.91.175.52','synthetic-csrf','test-user','password=')) {
+        Assert-True (-not $logs.Contains($secret)) 'Sensitive log value found'
+    }
 }
 Write-Host "$script:passed passed; $script:failed failed"
 if ($script:failed) { exit 1 }
