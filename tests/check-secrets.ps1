@@ -27,7 +27,7 @@ try {
     }
     if ($History) {
         # Capture output in memory only. Never print possible account/secret matches.
-        $historyText = (git log --all --format=fuller --patch --no-ext-diff --no-color) -join "`n"
+        $historyText = (git log --all --format=fuller --patch --diff-merges=first-parent --no-ext-diff --no-color) -join "`n"
         if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect repository history.' }
         foreach ($pattern in $patterns) {
             if ([regex]::IsMatch($historyText, $pattern)) { throw 'Potential secret in history; values suppressed.' }
