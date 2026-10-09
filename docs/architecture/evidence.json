@@ -1,5 +1,5 @@
 {
-  "source_commit": "5b18ed5662041fc254e9ca5c13de9280548578ca",
+  "source_version": "v1.3.2",
   "reviewed_on": "2026-10-09",
   "diagram_source": "README.md",
   "sources": [
@@ -9,6 +9,11 @@
         "function Test-Internet",
         "function Resolve-PortalSession",
         "function Test-TrustedLocalNetwork",
+        "function Test-TrustedBootstrapUri",
+        "function Get-PhysicalNetworkCandidates",
+        "function Get-RegisteredNetworks",
+        "function Resolve-PwshExecutable",
+        "function New-WhutTaskActionSpec",
         "function Read-ProtectedPassword",
         "function Invoke-LoginCommand",
         "Start-Sleep -Milliseconds 750",

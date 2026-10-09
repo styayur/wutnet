@@ -1,0 +1,35 @@
+name: Android
+on:
+  push:
+    branches: [main, 'feat/**']
+    paths: ['android/**', '.github/workflows/android.yml']
+  pull_request:
+    paths: ['android/**', '.github/workflows/android.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+          cache-dependency-path: |
+            android/**/*.gradle.kts
+            android/gradle/wrapper/gradle-wrapper.properties
+      - name: Install Android SDK packages
+        run: bash ci/install-sdk.sh
+      - name: Unit tests
+        run: ./gradlew test --console=plain
+      - name: Lint
+        run: ./gradlew lint --console=plain
+      - name: Debug APK
+        run: ./gradlew assembleDebug --console=plain

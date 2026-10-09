@@ -1,0 +1,33 @@
+name: Windows PowerShell
+on:
+  push:
+    branches: [main, 'fix/**', 'release/**']
+    paths: ['whut-net.ps1', 'tests/**', '.github/workflows/windows.yml', 'README.md', 'docs/**']
+  pull_request:
+    paths: ['whut-net.ps1', 'tests/**', '.github/workflows/windows.yml', 'README.md', 'docs/**']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: PowerShell syntax
+        run: |
+          $files = @('whut-net.ps1') + @(Get-ChildItem tests -Filter *.ps1 | ForEach-Object FullName)
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors)
+            if ($errors.Count) { throw "Syntax errors in $file" }
+          }
+      - name: Offline regression tests
+        run: ./tests/windows.tests.ps1
+      - name: Tracked secrets and ignored local state
+        run: ./tests/check-secrets.ps1 -History

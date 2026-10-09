@@ -1,29 +1,25 @@
-# Architecture evidence
+# Architecture evidence — Windows v1.3.2
 
-Source review: `5b18ed5662041fc254e9ca5c13de9280548578ca` (2026-10-09).
+The marked Mermaid block in [README](../../README.md) is the maintained diagram source. It describes the current single-file Windows client, including bootstrap/cookie setup, registered physical fingerprints, late decryption and post-login verification. The separate Android directory is unchanged.
 
-The marked Mermaid block in [README](../../README.md) is the only maintained diagram source. GitHub renders it natively in the reader's theme. No duplicate SVG or independent `.mmd` is committed; extracted Mermaid and SVG files are disposable verification artifacts.
+Source reviewed for the v1.3.2 release on 2026-10-09. Anchors in [evidence.json](evidence.json) catch renamed/deleted symbols; they do not prove semantics. The diagram was checked against the function call sites. In particular, the 750 ms verification delay is not a retry loop, and Task Scheduler starts a finite process rather than a daemon.
 
-本图只描述远端主分支的 Windows PowerShell 客户端，不包含其他分支的 Android 实现。所有网络调用由 `whut-net.ps1` 发起；配置和 DPAPI 密码保存在当前用户本地目录。凭据发送前检查 Portal allowlist 和 Windows 物理网络配置。
+## Lightweight verification
 
-Portal 当前使用 HTTP，DPAPI 只保护本地密码，不能提供传输加密。登录接口返回后还需核对账号状态和实际联网结果。当前源码没有自动重试循环或退避模块：失败返回明确 exit code；后续重试来自用户再次调用，或已安装任务的下一次登录/联网事件。不得把一次 750 ms 等待画成重试机制。
+```powershell
+pwsh -NoProfile -File tests/check-architecture.ps1
+```
 
-## Source map
+This verifies the authoritative diagram block, source anchors, local documentation links, PowerShell syntax and versioned help. It is the automatic documentation CI gate; README/docs changes do not install rendering toolchains or trigger Android builds.
 
-- [whut-net.ps1](../../whut-net.ps1): `function Test-Internet`, `function Resolve-PortalSession`, `function Test-TrustedLocalNetwork`, `function Read-ProtectedPassword`, `function Invoke-LoginCommand`, `Start-Sleep -Milliseconds 750`, `function Install-WhutScheduledTask`
+## Optional historical renderer
 
-The anchors in `evidence.json` catch renamed/deleted source symbols; they do not prove call semantics. The source review above checked the actual call sites and boundaries. A significant change to data flow, persistence, authentication, recovery or process boundaries requires reviewing this diagram and updating the evidence. Routine edits do not require redrawing it.
-
-## Verification
-
-Requires Python 3, Node.js 22+ and network access for the documentation-only Mermaid CLI. From the repository root:
+The existing development-only Python/Node renderer from the earlier architecture documentation remains available manually:
 
 ```sh
 python docs/architecture/verify.py --render
 ```
 
-This checks local README image references and source anchors, extracts the authoritative block, renders it twice with Mermaid CLI 11.12.0 using deterministic IDs, compares SVG bytes, validates SVG XML, and also renders the dark theme. If the bundled browser is unavailable, pass `--chrome /absolute/path/to/chrome` (or set `PUPPETEER_EXECUTABLE_PATH`). The CLI version is pinned; its transitive npm dependencies and the browser are environment-dependent, so the byte comparison proves repeatability within the same installed toolchain. Output goes to a temporary directory, never application runtime dependencies. GitHub Markdown/browser rendering still requires visual review; CLI validation alone is not evidence of GitHub rendering.
+It extracts Mermaid, renders with pinned Mermaid CLI 11.12.0, checks SVG XML and compares deterministic repeated output in one toolchain. This optional check needs Python 3, Node.js and a browser; none is a WUTNet runtime dependency. It can also be requested through the architecture workflow's manual dispatch. GitHub browser appearance still needs visual review.
 
-GitDiagram returned an initial diagram on 2026-10-09 for the public repository as a discovery aid. Its page reported **0 source files read**, so its README-derived connections were checked directly against the local PowerShell source. Its generated output is not imported as authoritative architecture or licensed artwork. No private source, config or credentials were submitted.
-
-Existing repository licenses and third-party notices continue to apply. These diagrams are documentation authored from this repository's public source; no app icons, installer assets or third-party marks are replaced.
+Historical note: the original architecture snapshot was reviewed at commit `5b18ed5`. Its README-only discovery aid was not treated as authoritative source analysis. The current diagram and evidence supersede that snapshot without importing generated artwork or private data.

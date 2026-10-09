@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <!-- Exact IP entry works on stock Android, but domain-config is not an IP firewall.
+         Protocol validates each URL again; OEM behaviour needs field verification.
+         Only these credential-free discovery probes and WHUT may use HTTP. -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">172.30.21.100</domain>
+        <domain includeSubdomains="false">neverssl.com</domain>
+        <domain includeSubdomains="false">www.msftconnecttest.com</domain>
+    </domain-config>
+</network-security-config>

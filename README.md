@@ -1,375 +1,200 @@
-# WHUT-Net
+# WUTNet
 
-[![PowerShell](https://img.shields.io/badge/PowerShell-7.2%2B-5391FE?logo=powershell&logoColor=white)](https://github.com/PowerShell/PowerShell)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-lightgrey)](#requirements)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+**v1.3.2 · Field-verified Windows release**
 
-A minimal, zero-third-party-runtime-dependency PowerShell 7 authenticator for the Wuhan University of Technology (WHUT) captive portal.
+A minimal PowerShell 7 authenticator and auto-login utility for the Wuhan University of Technology captive portal.
 
-WHUT-Net is designed to replace repeated browser-based campus-network login with a small, auditable Windows-native script. It discovers the current WHUT portal session dynamically, handles CSRF/cookies, protects the stored password with Windows DPAPI, and can run automatically through Task Scheduler without keeping a resident process in memory.
+Windows-native · single-file · zero third-party runtime dependencies · cross-campus dynamic discovery · TUN/VPN-aware · no resident daemon
 
-> **Status:** `v0.1.0-alpha.1` is an early, experimental release. Local configuration, PowerShell 7 execution, credential storage and Internet probing have been exercised, but the complete offline → captive portal → authentication → Internet recovery path should still be treated as experimental until field-tested against the current WHUT deployment.
+[Download v1.3.2](https://github.com/styayur/wutnet/releases/tag/v1.3.2) · [Release notes](docs/releases/v1.3.2.md) · [Field validation](docs/FIELD_VALIDATION.md)
 
-## 无凭据命令演示
+## What it does
 
-```powershell
-pwsh -NoProfile -File ./whut-net.ps1 help
-```
+WUTNet discovers the current WHUT login session, authenticates when needed, and verifies both account status and Internet recovery. It protects the saved password with Windows DPAPI and can run on logon or network reconnect through Task Scheduler.
 
-2026-10-09 在 Windows 实际运行，exit 0，输出开头：
+The Windows client is one file: `whut-net.ps1`. The existing [experimental Android client](docs/ANDROID.md) is maintained separately and is unchanged by this release.
 
-```text
-WHUT-Net v0.1.0-alpha.1
+## Why WUTNet exists
 
-Usage:
-  .\whut-net.ps1 setup [-Username <student-id>]
-  .\whut-net.ps1 status
-  .\whut-net.ps1 login
-  .\whut-net.ps1 auto
-```
-
-这是命令入口验证；未使用校园账号，未执行 setup/login/install，不代表校园网认证成功。实际认证需要受信任的校园网络，现有安装和安全说明继续适用。
-
-## Features
-
-- Single-file PowerShell 7 implementation
-- No Python, browser extension, Docker, service or third-party PowerShell module
-- Dynamic captive-portal discovery
-- Dynamic `nasId` extraction
-- Dynamic API base-path discovery from the WHUT portal configuration
-- Cookie-aware CSRF session handling
-- Windows DPAPI `CurrentUser` password protection
-- Explicit proxy bypass for local portal traffic
-- Hard-coded WHUT portal host/path allowlist
-- Trusted physical Windows network-profile binding for automatic login
-- Optional Task Scheduler integration
-- No resident polling loop
-- Bounded local logging with no password, cookie or CSRF-token output
+Repeated campus-network sign-ins should not require opening a browser every time. WUTNet performs a finite check or login, returns an exit code, and exits. It discovers campus-specific session parameters instead of storing an old portal URL.
 
 ## Requirements
 
-- Windows 10 or Windows 11
-- PowerShell 7.2 or later (`pwsh.exe`)
-- Access to the WHUT campus network
+- Windows 10 or 11; field-verified on Windows 11.
+- PowerShell **7.2+ Core** (`pwsh.exe`); field-verified with **7.6.6**.
+- An authorized WHUT account and connection to the WHUT network.
 
-Windows PowerShell 5.1 (`powershell.exe`) is not supported.
-
-Check your version:
-
-```powershell
-$PSVersionTable.PSVersion
-$PSVersionTable.PSEdition
-```
-
-Expected:
-
-```text
-7.2+
-Core
-```
+Windows PowerShell 5.1 (`powershell.exe`) is not supported. No Python, browser extension, third-party PowerShell module, service or additional runtime is required by the client.
 
 ## Quick Start
 
-Clone or download `whut-net.ps1`, then open PowerShell 7 in the script directory.
+Download `whut-net.ps1` and `SHA256SUMS.txt` from the release. Compare the script hash with `Get-FileHash .\whut-net.ps1 -Algorithm SHA256`. Keep the script in a stable location before installing automation.
 
-If Windows has marked the downloaded script as originating from the Internet, remove that file-level mark:
-
-```powershell
-Unblock-File .\whut-net.ps1
-```
-
-Configure your account while connected to the WHUT network:
+Open PowerShell 7 while connected to WHUT. If Windows has marked the downloaded file, inspect it and run `Unblock-File .\whut-net.ps1`.
 
 ```powershell
 .\whut-net.ps1 setup -Username <student-id>
-```
-
-The password prompt is interactive. The password is stored using Windows DPAPI and is not written to the repository or configuration file in plaintext.
-
-Before attempting login, inspect the current network and portal state:
-
-```powershell
 .\whut-net.ps1 diagnose
-```
-
-Then test a manual login:
-
-```powershell
 .\whut-net.ps1 login
 ```
 
-Verify the result:
+Enter the password at the secure prompt. After successful login:
 
 ```powershell
 .\whut-net.ps1 status
-```
-
-Only after manual testing succeeds should automatic login be enabled:
-
-```powershell
 .\whut-net.ps1 install
 ```
+
+To trust another WHUT physical network, such as WHUT-DORM in addition to WHUT-WLAN, connect to that network and explicitly register it:
+
+```powershell
+.\whut-net.ps1 setup -AddNetwork
+```
+
+`-AddNetwork` keeps the existing account, encrypted password and registrations. Registering the same fingerprint twice does not duplicate it. Ordinary `setup` saves a password and resets the trust list to the current network; use `-AddNetwork` to preserve previous networks.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `setup [-Username <student-id>]` | Save the username, DPAPI-protected password and current trusted physical network profile |
-| `status` | Check Internet and WHUT authentication state without logging in |
-| `login` | Authenticate once when required |
-| `auto` | Idempotent mode intended for Task Scheduler; exits immediately when already online |
-| `diagnose` | Inspect portal discovery, `nasId`, API base, CSRF acquisition and account state without submitting the stored password |
-| `install` | Register the per-user automatic-login scheduled task |
-| `uninstall` | Remove the scheduled task and all WHUT-Net local state |
-| `help` | Show built-in usage information |
-
-## How It Works
-
-```text
-Windows network connected
-        |
-        v
-Internet probe
-   |          |
- online     captive/offline
-   |          |
-  exit        v
-        Discover WHUT portal
-               |
-               v
-        Validate host + path
-               |
-               v
-          Extract nasId
-               |
-               v
-        Read API base path
-               |
-               v
-       Establish CSRF/cookie
-             session
-               |
-               v
-       Check account status
-               |
-          offline only
-               |
-               v
-      Validate trusted local
-        network profile
-               |
-               v
-       Decrypt DPAPI password
-               |
-               v
-          POST login
-               |
-               v
-       Verify account status
-               |
-               v
-        Verify Internet access
-```
-
-The script does not keep a background daemon running. When automatic login is installed, Windows Task Scheduler invokes the script on user logon and network-connect events; the process exits after the check or authentication attempt completes.
-
-## Security Model
-
-WHUT-Net deliberately keeps the trust boundary narrow.
-
-### Credentials at rest
-
-The password is stored under:
-
-```text
-%LOCALAPPDATA%\WHUT-Net\credential.dat
-```
-
-PowerShell's `ConvertFrom-SecureString` uses Windows DPAPI for the current Windows user. Another Windows account cannot normally decrypt the stored value.
-
-The username and trusted Windows network-profile names are stored separately in:
-
-```text
-%LOCALAPPDATA%\WHUT-Net\config.json
-```
-
-### Portal allowlist
-
-Credentials are only submitted after the discovered captive portal matches the expected WHUT portal host and path.
-
-Dynamic values such as `nasId` may change between sessions, but the authentication destination is not accepted from an arbitrary redirect.
-
-### Trusted local network profile
-
-Automatic login additionally requires a physical Windows network profile captured during `setup`.
-
-This is a defence-in-depth check, not cryptographic server authentication.
-
-### HTTP limitation
-
-The current WHUT captive portal uses HTTP.
-
-DPAPI protects the password **at rest**, but WHUT-Net cannot provide transport encryption that the upstream portal itself does not support. Users should understand this limitation before enabling unattended authentication.
-
-### Logging
-
-WHUT-Net does not intentionally log:
-
-- passwords
-- decrypted credential material
-- cookies
-- CSRF token values
-- login request bodies
-- usernames and trusted network-profile names
-- raw portal response messages or unexpected exception details
-
-The log is stored at:
-
-```text
-%LOCALAPPDATA%\WHUT-Net\whut-net.log
-```
-
-and is rotated when it reaches approximately 1 MiB.
+| `setup [-Username <student-id>]` | Save account/password and register the current physical network |
+| `setup -AddNetwork` | Explicitly append a physical network without changing the account/password |
+| `status` | Check Internet and account state; never log in |
+| `login` | Authenticate once if needed, then verify account and Internet |
+| `auto` | Automatic mode; exit immediately if already online; otherwise require a registered fingerprint |
+| `diagnose` | Inspect discovery, bootstrap, physical fingerprint, API, CSRF and status without sending the password |
+| `install` | Register the per-user scheduled task |
+| `uninstall` | Remove the task and local configuration, credential and logs |
+| `help` | Show usage and exit codes |
 
 ## Automatic Login
 
-After validating manual login:
-
-```powershell
-.\whut-net.ps1 install
-```
-
-This registers a per-user Task Scheduler task named:
+`install` creates **WHUT-Net AutoLogin**, using the current interactive user's token and least privilege. It stores no Windows account password.
 
 ```text
-WHUT-Net AutoLogin
+Windows Task Scheduler
+  → user logon or NetworkProfile EventID 10000
+  → pwsh -NoLogo -NoProfile -NonInteractive
+  → whut-net.ps1 auto
+  → verify or authenticate, then exit
 ```
 
-The task runs with the current interactive user's token and least privilege. It is triggered by:
+There is no polling loop, resident service or daemon. Overlapping task instances are ignored. Reconnect-triggered login has been field-tested without opening a browser.
 
-- user logon
-- Windows Network Profile connection events
+The executable resolver prefers `%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe`, then `$PSHOME\pwsh.exe`, then one unambiguous installed application candidate. The Store alias survives package-version changes. Re-run `install` after moving the script.
 
-The task invokes PowerShell 7 and executes:
+## How it works
+
+Internet preflight checks NCSI content and NeverSSL identity independently. If not online, discovery tries NCSI redirect, NCSI content, NeverSSL, then the direct WHUT page. Each request has a 4-second timeout; discovery shares a 16-second request budget, with up to 8 seconds of preflight.
 
 ```text
-whut-net.ps1 auto
+Public HTTP probe → /api/r/<nasId> bootstrap → canonical login page
+→ config.js → safe API base → CSRF + cookies → account/status
+→ registered physical network check → late DPAPI decrypt → login POST
+→ account/status verification → Internet recovery verification
 ```
 
-No Windows account password is stored in Task Scheduler.
+`nasId`, `userip`, `acip`, `acname` and `wlanacname` are discovered per session. Bootstrap is replayed in the same cookie jar before the canonical page is opened. Foreign redirects are ignored without following them or granting trust; an unknown WHUT destination returns `ProtocolChanged` (13).
 
-To remove the task and local WHUT-Net data:
+Only active `var|let|const host_url` declarations are parsed from config.js. Comments are ignored, identical values are deduplicated, and distinct values are rejected. A missing config permits `/api` fallback only after an active CSRF fingerprint check. Status and login JSON shapes are also validated.
 
-```powershell
-.\whut-net.ps1 uninstall
-```
+Authentication success means **login response + account status verification + Internet recovery verification**, not merely a successful POST.
 
-## Exit Codes
+## Security Model
 
-| Code | Meaning |
-| ---: | --- |
-| `0` | Online or authentication succeeded |
-| `10` | WHUT portal reached; account offline |
-| `11` | WHUT portal not discovered or `nasId` missing |
-| `12` | Untrusted portal, network profile or unsafe API path |
-| `20` | Authentication failed |
-| `21` | Additional verification/code check required |
-| `22` | CSRF acquisition failed |
-| `30` | WHUT portal/API unavailable |
-| `40` | Network failure or post-authentication Internet verification failure |
-| `50` | Local configuration or credential error |
+- **Storage:** DPAPI `CurrentUser` protects the password in `%LOCALAPPDATA%\WHUT-Net\credential.dat`. Account and fingerprints are in `config.json`; bounded logs are in `whut-net.log`. These files are ignored by Git.
+- **Network registrations:** config v3 stores `trustedNetworks[]`. Existing v2 `trustedNetwork` is automatically migrated on read without changing the account or credential. Legacy v1 remains readable but needs explicit setup before automatic login.
+- **Trust checks:** auto must match one registered IPv4 prefix, gateway, portal host and interface identity. Profile/SSID names never enroll networks or grant trust. DHCP host-address and profile suffix changes are tolerated. Manual login permits interface alias/type changes while retaining prefix/gateway/host checks.
+- **Physical selection:** enumerate active physical adapters, exclude APIPA and `198.18.0.0/15`, and match the bootstrap `userip` exactly when supplied. Otherwise use unambiguous physical candidates/metrics. TUN route ownership alone does not select the fingerprint.
+- **Destination:** exact WHUT host/path/port checks apply to bootstrap and login. API bases must be safe relative paths. HTTP proxy use and automatic redirects are disabled.
+- **Password lifetime:** decrypt only immediately before the dedicated POST. Clear owned BSTR, character and byte buffers on success/failure. No plaintext password string is deliberately constructed. PowerShell/.NET cannot guarantee immediate removal of every runtime/HTTP-stack copy.
+- **Output:** no password, account identifier, Cookie, CSRF value, complete user IP, request body or raw server message is logged. Protocol errors are separate from credential rejection.
 
-These codes are intended to make the script usable from Task Scheduler and other PowerShell automation.
+WHUT currently uses **HTTP**. DPAPI protects the password **at rest only**. IP/path/protocol/network fingerprints are defence-in-depth, not cryptographic server authentication. This script does not manage VPNs or bind sockets to the selected adapter; a TUN/VPN can still block portal traffic or change routing after a trust check.
+
+## Field Validation
+
+**Field-verified against multiple current WHUT access environments; future portal changes may require protocol updates.** Maintainer-supplied field evidence covers Windows 11 and PowerShell 7.6.6 Core:
+
+- ✓ `/api/r/<nasId>` bootstrap and multiple campus/BRAS environments
+- ✓ Dynamic `nasId` / `userip` / `acip` / `acname`
+- ✓ Physical WLAN discovery with Meta/TUN present
+- ✓ Comment-safe config.js `/api` discovery and CSRF + cookies
+- ✓ Real credential login, status verification and Internet recovery
+- ✓ Online `status` and idempotent `auto`
+- ✓ Task installation with the Store alias and scheduled auto-login after reconnect
+
+The [engineering record](docs/FIELD_VALIDATION.md) separates these field observations from offline regression tests. Multiple-network registration and v2→v3 migration added during release preparation are offline-tested; a fresh multi-registration campus-switch test is not claimed.
 
 ## Troubleshooting
 
-### The script requires PowerShell 7.2
+| Symptom | Check |
+| --- | --- |
+| Empty reply from server | Confirm WHUT connectivity and discover a fresh campus session. The portal may be unreachable or the captured URL stale. Do not reuse an old `/api/r/<nasId>?...` URL. |
+| `ProtocolChanged` / exit 13 | WHUT frontend/API shape or redirect path may have changed. Run `diagnose`; do not bypass the allowlist. |
+| No physical fingerprint | Check WHUT connectivity, multiple physical uplinks and complete IPv4/gateway data. TUN route ownership is excluded from selection; an unmatched campus `userip` fails closed. |
+| Different campus/network refused | Connect there and explicitly run `setup -AddNetwork`. No network is trusted merely because its profile name looks familiar. |
+| PowerShell not found / task install fails | Verify PowerShell 7 and its Store App Execution Alias at `%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe`. Multiple ambiguous fallback candidates are refused. |
+| HTTP warning | Expected: DPAPI protects storage, while WHUT's portal itself uses HTTP. |
+| Script execution blocked | Use PowerShell 7, inspect the downloaded script and unblock that file; no global policy change is required. |
 
-If the error mentions Windows PowerShell 5.1, you launched `powershell.exe` instead of `pwsh.exe`.
+`diagnose` showing Internet OK means no authentication is needed. Local logs can be inspected with `Get-Content "$env:LOCALAPPDATA\WHUT-Net\whut-net.log" -Tail 50`; review any diagnostic output before sharing.
 
-Run:
+| Exit | Meaning |
+| ---: | --- |
+| 0 | Successful command / online / verified login |
+| 10 | Account offline |
+| 11 | Portal not found or session `nasId` missing |
+| 12 | Untrusted network/destination or unsafe API path |
+| 13 | Unsupported or changed protocol |
+| 20 | Authentication explicitly rejected |
+| 21 | Additional verification required |
+| 22 | CSRF/bootstrap request failed |
+| 30 | Portal/API unavailable |
+| 31 | Discovery exhausted after probe timeouts |
+| 40 | Network or post-authentication verification failure |
+| 50 | Local config, credential or executable-resolution error |
 
-```powershell
-pwsh
-```
-
-Then retry the command.
-
-### Script execution is blocked
-
-Inspect the current policy:
-
-```powershell
-Get-ExecutionPolicy -List
-```
-
-For a downloaded copy you have inspected, removing the file's Internet mark is usually preferable to globally weakening PowerShell policy:
-
-```powershell
-Unblock-File .\whut-net.ps1
-```
-
-### Diagnose reports `Internet: OK`
-
-This means the machine already has Internet access, so WHUT-Net intentionally does not contact the captive portal.
-
-To validate the complete authentication flow, test during a genuine unauthenticated WHUT session.
-
-### Inspect logs
-
-```powershell
-Get-Content "$env:LOCALAPPDATA\WHUT-Net\whut-net.log" -Tail 50
-```
-
-## Project Scope
-
-WHUT-Net intentionally does **not** aim to become a general campus-network manager.
-
-The project is limited to:
-
-- detecting the WHUT captive portal
-- authenticating safely enough within the constraints of the upstream portal
-- integrating cleanly with Windows
-- exiting when its work is complete
-
-Features such as GUI management, multi-account rotation, bandwidth monitoring, generic multi-campus adapters and persistent background polling are outside the current scope.
-
-## Disclaimer
-
-This is an unofficial community project and is not affiliated with, endorsed by, or maintained by Wuhan University of Technology.
-
-Campus-network infrastructure and authentication APIs may change without notice. Use the script only with an account and network access you are authorised to use.
-
-## Architecture
+## Architecture / Protocol
 
 <!-- architecture:overview:start -->
 ```mermaid
 flowchart TD
-  Start[login / auto command] --> Probe{Internet probe succeeds?}
-  Probe -->|yes| Done[Exit 0: online]
-  Probe -->|no| Portal[Discover allowlisted WHUT portal]
-  Portal --> Session[Cookie session / API path / CSRF]
-  Session --> Status{Account already online?}
-  Status -->|yes| Verify[Verify Internet connectivity]
-  Status -->|no| Trust[Validate physical network profile]
-  Store[(Local config / DPAPI password)] --> Trust
-  Trust --> Login[Portal login request]
+  Start[login / auto] --> Probe{Internet verified?}
+  Probe -->|yes| Done[Exit 0]
+  Probe -->|no| Portal[Discover and validate WHUT bootstrap / portal]
+  Portal --> Session[Replay bootstrap; config / cookies / CSRF]
+  Session --> Status{Account online?}
+  Status -->|yes| Verify[Verify Internet]
+  Status -->|no| Trust[Match a registered physical fingerprint]
+  Config[(Config: trustedNetworks)] --> Trust
+  Trust --> Decrypt[Late DPAPI decrypt]
+  Store[(DPAPI credential)] --> Decrypt
+  Decrypt --> Login[Dedicated login POST; clear owned buffers]
   Login --> Check[Wait 750 ms; verify account status]
   Check --> Verify --> Result[Exit code / redacted log]
-  Scheduler[Optional Task Scheduler: logon / network event] -.-> Start
+  Scheduler[Task Scheduler: logon / reconnect] -.-> Start
 ```
 <!-- architecture:overview:end -->
 
-本图只描述远端主分支的 Windows PowerShell 客户端，不包含其他分支的 Android 实现。所有网络调用由 `whut-net.ps1` 发起；配置和 DPAPI 密码保存在当前用户本地目录。凭据发送前检查 Portal allowlist 和 Windows 物理网络配置。
+All Windows authentication logic stays in one PowerShell file. The 750 ms delay is a single verification delay, not a retry loop. See [protocol details](docs/protocol.md) and [architecture evidence](docs/architecture/README.md). Existing [Android notes](docs/ANDROID.md) describe the separate client.
 
-Portal 当前使用 HTTP，DPAPI 只保护本地密码，不能提供传输加密。登录接口返回后还需核对账号状态和实际联网结果。当前源码没有自动重试循环或退避模块：失败返回明确 exit code；后续重试来自用户再次调用，或已安装任务的下一次登录/联网事件。不得把一次 750 ms 等待画成重试机制。
+## Limitations
 
-[Source evidence and diagram verification](docs/architecture/README.md).
+This is an unofficial community client, not affiliated with WHUT. It has no CAPTCHA solver, Wi-Fi scanner, VPN manager, GUI or cloud service. Scheduled execution uses an interactive user session. Future portal changes, ambiguous physical networks or network filtering can prevent authentication; field verification is not a promise of universal campus compatibility.
+
+## Development
+
+Run from PowerShell 7 on Windows; tests use synthetic credentials and mocked transport:
+
+```powershell
+pwsh -NoLogo -NoProfile -File .\tests\windows.tests.ps1
+pwsh -NoLogo -NoProfile -File .\tests\check-secrets.ps1 -History
+pwsh -NoLogo -NoProfile -File .\tests\check-architecture.ps1
+```
+
+Windows CI runs `Parser::ParseFile`, offline regression and the secret/local-state guard. Documentation checks are lightweight; optional Mermaid rendering remains a manual development check. Android CI and source are unchanged. The secret guard is intentionally small, not an exhaustive secret scanner.
 
 ## License
 
-MIT License.
-
-This follows the repository owner's [License Policy](https://github.com/styayur/styayur/blob/main/LICENSE_POLICY.md), which assigns MIT to small scripts and automation projects.
-
-Third-party materials, if introduced in the future, remain under their respective upstream licences and are not relicensed by this project.
+[MIT](LICENSE). See [third-party notices](THIRD_PARTY.md) and the repository owner's [license policy](https://github.com/styayur/styayur/blob/main/LICENSE_POLICY.md). Use only an account and network you are authorized to access.
