@@ -527,6 +527,75 @@ Test-Case 'release version and bootstrap log redaction' {
         Assert-True (-not $logs.Contains($secret)) 'Sensitive log value found'
     }
 }
+Test-Case 'v2 migration preserves account, credential and original trust registration' {
+    $savedConfig = $Script:ConfigPath
+    $tempFile = [IO.Path]::GetTempFileName()
+    try {
+        $Script:ConfigPath = $tempFile
+        [pscustomobject]@{version=2;username='synthetic-account';trustedNetwork=(Network)} |
+            ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $tempFile
+        $config = Read-Config
+        Assert-Equal $config.version 3
+        Assert-Equal $config.username 'synthetic-account'
+        Assert-Equal @($config.trustedNetworks).Count 1
+        Assert-Equal $config.trustedNetworks[0].ipv4Prefix '10.91.0.0/16'
+        $stored = Get-Content -LiteralPath $tempFile -Raw | ConvertFrom-Json
+        Assert-Equal $stored.version 3
+        Assert-Equal @($stored.trustedNetworks).Count 1
+        Assert-Equal $stored.PSObject.Properties['trustedNetwork'] $null
+    }
+    finally { $Script:ConfigPath = $savedConfig; Remove-Item -LiteralPath $tempFile }
+}
+Test-Case 'auto accepts any registered fingerprint and never enrolls matching profile names' {
+    $first = Network
+    $second = Network
+    $second.ipv4Prefix = '10.82.0.0/15'; $second.defaultGateway = '10.82.0.1'; $second.interfaceAlias = 'WLAN'
+    $config = [pscustomobject]@{version=3;username='synthetic';trustedNetworks=@($first,$second)}
+    function Get-CurrentNetworkFingerprint { $second }
+    Assert-True (Test-TrustedLocalNetwork $config -Automatic)
+    function Get-CurrentNetworkFingerprint { $first }
+    Assert-True (Test-TrustedLocalNetwork $config -Automatic)
+    $before = $config | ConvertTo-Json -Depth 5
+    function Get-CurrentNetworkFingerprint { $n = Network; $n.ipv4Prefix = '192.168.0.0/24'; $n }
+    Assert-True (-not (Test-TrustedLocalNetwork $config -Automatic))
+    Assert-Equal ($config | ConvertTo-Json -Depth 5) $before
+    function Get-CurrentNetworkFingerprint { $n = Network; $n.defaultGateway = $second.defaultGateway; $n }
+    Assert-True (-not (Test-TrustedLocalNetwork $config -Automatic)) 'Fields from different registrations must not combine'
+}
+Test-Case 'explicit AddNetwork appends once without requesting or changing credentials' {
+    $savedPaths = @($Script:DataDir,$Script:ConfigPath,$Script:CredentialPath)
+    $directory = Join-Path ([IO.Path]::GetTempPath()) ('wutnet-tests-' + [Guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($directory)
+    try {
+        $Script:DataDir = $directory
+        $Script:ConfigPath = Join-Path $directory 'config.json'
+        $Script:CredentialPath = Join-Path $directory 'credential.dat'
+        Write-Config ([pscustomobject]@{version=3;username='synthetic-account';trustedNetworks=@((Network))})
+        Set-Content -LiteralPath $Script:CredentialPath -Value 'synthetic-encrypted-placeholder'
+        $credentialHash = (Get-FileHash -LiteralPath $Script:CredentialPath).Hash
+        function Read-Host { throw 'AddNetwork must not prompt for a password' }
+        function Read-ProtectedPassword { throw 'AddNetwork must not decrypt a credential' }
+        function Get-WhutNetworkHint { '10.82.155.225' }
+        function Get-CurrentNetworkFingerprint {
+            $n = Network; $n.ipv4Prefix = '10.82.0.0/15'; $n.defaultGateway = '10.82.0.1'; $n.interfaceAlias = 'WLAN'; $n
+        }
+        Assert-Equal (Invoke-SetupCommand -AddNetwork) 0
+        Assert-Equal @((Read-Config).trustedNetworks).Count 2
+        Assert-Equal (Invoke-SetupCommand -AddNetwork) 0
+        Assert-Equal @((Read-Config).trustedNetworks).Count 2
+        Assert-Equal (Read-Config).username 'synthetic-account'
+        Assert-Equal (Get-FileHash -LiteralPath $Script:CredentialPath).Hash $credentialHash
+        Assert-Code { Invoke-SetupCommand -AddNetwork -RequestedUsername 'different-account' } 50
+        function Get-CurrentNetworkFingerprint { $null }
+        Assert-Code { Invoke-SetupCommand -AddNetwork } 12
+        Assert-Equal @((Read-Config).trustedNetworks).Count 2
+    }
+    finally {
+        Remove-Item -LiteralPath (Join-Path $directory 'config.json'),(Join-Path $directory 'credential.dat') -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $directory
+        $Script:DataDir,$Script:ConfigPath,$Script:CredentialPath = $savedPaths
+    }
+}
 Write-Host "$script:passed passed; $script:failed failed"
 if ($script:failed) { exit 1 }
 exit 0

@@ -30,7 +30,9 @@ param(
     [ValidateSet('help', 'setup', 'status', 'login', 'auto', 'diagnose', 'install', 'uninstall')]
     [string]$Command = 'help',
 
-    [string]$Username
+    [string]$Username,
+
+    [switch]$AddNetwork
 )
 
 Set-StrictMode -Version Latest
@@ -285,18 +287,33 @@ function Test-TrustedLocalNetwork {
         return (-not $Automatic)
     }
 
-    $trusted = Get-ObjectProperty $Config 'trustedNetwork'
-    if ($null -eq $trusted) { return $false }
+    foreach ($trusted in @(Get-RegisteredNetworks $Config)) {
+        if (Test-NetworkFingerprintMatch $current $trusted -Automatic:$Automatic) { return $true }
+    }
+    return $false
+}
 
-    # DHCP host addresses and Windows profile suffixes may change. Prefix/gateway are
-    # primary trust anchors. Automatic mode additionally checks interface identity.
+function Get-RegisteredNetworks {
+    param($Config)
+    if ((Get-ObjectProperty $Config 'version' 1) -eq 2) {
+        $single = Get-ObjectProperty $Config 'trustedNetwork'
+        if ($null -ne $single) { return $single }
+        return
+    }
+    return @(Get-ObjectProperty $Config 'trustedNetworks' @()) | Where-Object { $null -ne $_ }
+}
+
+function Test-NetworkFingerprintMatch {
+    param($Current, $Trusted, [switch]$Automatic)
+    if ($null -eq $Current -or $null -eq $Trusted) { return $false }
+    # Profile names and DHCP host addresses never grant trust or add registrations.
     $fields = @('ipv4Prefix', 'defaultGateway', 'portalHost')
     if ($Automatic) { $fields += @('interfaceAlias', 'interfaceType') }
 
     foreach ($field in $fields) {
-        $expected = [string](Get-ObjectProperty $trusted $field '')
+        $expected = [string](Get-ObjectProperty $Trusted $field '')
         if ([string]::IsNullOrWhiteSpace($expected) -or
-            $expected -cne [string](Get-ObjectProperty $current $field '')) {
+            $expected -cne [string](Get-ObjectProperty $Current $field '')) {
             return $false
         }
     }
@@ -359,11 +376,37 @@ function Read-Config {
     }
 
     $version = Get-ObjectProperty $config 'version' 1
-    if ($version -notin @(1, 2)) { Throw-Whut 50 'Unsupported configuration version.' }
+    if ($version -notin @(1, 2, 3)) { Throw-Whut 50 'Unsupported configuration version.' }
     if ($version -eq 1) {
         Write-Log WARN 'Version 1 configuration: run setup on WHUT to capture a network fingerprint before auto/install.'
     }
+    if ($version -eq 2) {
+        $config = [pscustomobject]@{
+            version = 3
+            username = [string]$storedUsername
+            trustedNetworks = @(Get-RegisteredNetworks $config)
+        }
+        Write-Config $config
+        Write-Log INFO 'Configuration migrated from v2 to v3; existing network and credential retained.'
+    }
     return $config
+}
+
+function Write-Config {
+    param($Config)
+    # Replace in the same directory; never leave a partially written trust list.
+    $temporary = $Script:ConfigPath + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+    try {
+        $Config | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $temporary -Encoding utf8
+        if (Test-Path -LiteralPath $Script:ConfigPath) {
+            [IO.File]::Replace($temporary, $Script:ConfigPath, [NullString]::Value)
+        }
+        else { [IO.File]::Move($temporary, $Script:ConfigPath) }
+    }
+    catch { Throw-Whut 50 'Could not save network configuration; existing configuration retained.' }
+    finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+    }
 }
 
 function Read-ProtectedPassword {
@@ -1339,10 +1382,37 @@ function Invoke-DiagnoseCommand {
 
 function Invoke-SetupCommand {
     param(
-        [string]$RequestedUsername
+        [string]$RequestedUsername,
+        [switch]$AddNetwork
     )
 
     Ensure-DataDirectory
+
+    if ($AddNetwork) {
+        $config = Read-Config
+        if (-not (Test-Path -LiteralPath $Script:CredentialPath)) {
+            Throw-Whut 50 'Run setup with a password before adding a network.'
+        }
+        if ($RequestedUsername -and $RequestedUsername -cne [string]$config.username) {
+            Throw-Whut 50 'AddNetwork retains the existing account; do not specify a different username.'
+        }
+        $hint = Get-WhutNetworkHint
+        $current = Get-CurrentNetworkFingerprint -UserIpHint $hint
+        if ($null -eq $current) { Throw-Whut 12 'No unambiguous physical network to register. Connect to WHUT and retry.' }
+        $registered = @(Get-RegisteredNetworks $config)
+        foreach ($trusted in $registered) {
+            if (Test-NetworkFingerprintMatch $current $trusted -Automatic) {
+                Write-Log INFO 'This physical network fingerprint is already registered.'
+                return 0
+            }
+        }
+        Write-Config ([pscustomobject]@{
+            version = 3; username = [string]$config.username
+            trustedNetworks = @($registered) + @($current)
+        })
+        Write-Log INFO 'Additional physical network explicitly registered; existing account and credential retained.'
+        return 0
+    }
 
     $user = $RequestedUsername
     if ([string]::IsNullOrWhiteSpace($user)) {
@@ -1364,17 +1434,17 @@ function Invoke-SetupCommand {
         $networkHint = Get-WhutNetworkHint
         $trustedNetwork = Get-CurrentNetworkFingerprint -UserIpHint $networkHint
         $config = [ordered]@{
-            version = 2
+            version = 3
             username = $user
-            trustedNetwork = $trustedNetwork
+            trustedNetworks = @($trustedNetwork | Where-Object { $null -ne $_ })
         }
         # ConvertFrom-SecureString without -Key uses DPAPI CurrentUser on Windows.
         $encrypted = $password | ConvertFrom-SecureString
         Set-Content -LiteralPath $Script:CredentialPath -Value $encrypted -Encoding utf8
-        $config | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Script:ConfigPath -Encoding utf8
+        Write-Config $config
     }
     finally { $password.Dispose(); $password = $null; $encrypted = $null }
-    Write-Log INFO 'Configuration v2 saved. Password is protected with Windows DPAPI CurrentUser.'
+    Write-Log INFO 'Configuration v3 saved. Password is protected with Windows DPAPI CurrentUser.'
     if ($null -ne $trustedNetwork) {
         Write-Log INFO 'Trusted physical network fingerprint saved (TUN/VPN routes ignored).'
     }
@@ -1433,7 +1503,7 @@ function Install-WhutScheduledTask {
 
     $config = Read-Config
     if (-not (Test-TrustedLocalNetwork $config -Automatic)) {
-        Throw-Whut 50 'Install requires a matching version 2 physical network fingerprint. Run setup on WHUT.'
+        Throw-Whut 50 'Install requires a registered physical network fingerprint. Run setup on WHUT.'
     }
 
     $actionSpec = New-WhutTaskActionSpec -ScriptPath $PSCommandPath
@@ -1521,6 +1591,7 @@ WHUT-Net v$Script:Version
 
 Usage:
   .\whut-net.ps1 setup [-Username <student-id>]
+  .\whut-net.ps1 setup -AddNetwork
   .\whut-net.ps1 status
   .\whut-net.ps1 login
   .\whut-net.ps1 auto
@@ -1530,7 +1601,7 @@ Usage:
   .\whut-net.ps1 help
 
 Commands:
-  setup       Save username and a DPAPI-protected password.
+  setup       Save account/password and current network; -AddNetwork appends without changing the account.
   status      Check Internet / WHUT authentication state. Never logs in.
   login       Authenticate once if needed.
   auto        Idempotent mode for Task Scheduler: exit immediately when online.
@@ -1557,7 +1628,9 @@ Security:
   - Password at rest: Windows DPAPI CurrentUser.
   - Proxy variables are ignored for authentication traffic.
   - Credentials are sent only to the hard-coded allowlisted WHUT portal host.
-  - Auto requires a v2 physical IPv4 prefix, gateway and interface fingerprint.
+  - Auto requires a matching registered physical IPv4 prefix, gateway and interface fingerprint.
+  - Config v3 stores trustedNetworks[]; v2 single fingerprints migrate automatically.
+  - setup -AddNetwork explicitly registers another WHUT network; profile names never add trust.
   - Profile names are auxiliary; rerun setup to upgrade v1 without automatic migration.
   - Discovery: NCSI redirect/content, NeverSSL, direct WHUT; /api/r/<nasId> bootstrap is recognized.
   - Internet preflight never follows foreign redirects; unknown redirects are ignored and discovery continues.
@@ -1577,9 +1650,10 @@ if ($MyInvocation.InvocationName -eq '.') { return }
 $exitCode = 0
 
 try {
+    if ($AddNetwork -and $Command -ne 'setup') { Throw-Whut 50 'AddNetwork is only valid with setup.' }
     switch ($Command) {
         'help'     { $exitCode = Show-Help }
-        'setup'    { $exitCode = Invoke-SetupCommand -RequestedUsername $Username }
+        'setup'    { $exitCode = Invoke-SetupCommand -RequestedUsername $Username -AddNetwork:$AddNetwork }
         'status'   { $exitCode = Invoke-StatusCommand }
         'login'    { $exitCode = Invoke-LoginCommand }
         'auto'     { $exitCode = Invoke-LoginCommand -Automatic }

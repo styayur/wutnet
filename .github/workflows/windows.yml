@@ -1,7 +1,7 @@
 name: Windows PowerShell
 on:
   push:
-    branches: [main, 'fix/**']
+    branches: [main, 'fix/**', 'release/**']
     paths: ['whut-net.ps1', 'tests/**', '.github/workflows/windows.yml', 'README.md', 'docs/**']
   pull_request:
     paths: ['whut-net.ps1', 'tests/**', '.github/workflows/windows.yml', 'README.md', 'docs/**']
@@ -17,6 +17,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: PowerShell syntax
         run: |
           $files = @('whut-net.ps1') + @(Get-ChildItem tests -Filter *.ps1 | ForEach-Object FullName)
@@ -29,4 +30,4 @@ jobs:
       - name: Offline regression tests
         run: ./tests/windows.tests.ps1
       - name: Tracked secrets and ignored local state
-        run: ./tests/check-secrets.ps1
+        run: ./tests/check-secrets.ps1 -History

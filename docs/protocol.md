@@ -1,155 +1,83 @@
-# WHUT Portal protocol
+# WHUT Portal protocol — Windows v1.3.2
 
-This document records the observed protocol implemented by the existing root
-[`whut-net.ps1`](../whut-net.ps1) and the Android client. It is not an official WHUT
-specification. Full captive-session field validation remains pending on both platforms.
+This records the current field-verified Windows flow, not an official WHUT specification. The [field record](FIELD_VALIDATION.md) identifies the observed environments and separates them from offline regression coverage. Android implementation is unchanged; see the platform notes below.
 
-## Discovery and trust
+## Discovery and bootstrap
 
-Windows v0.1.1 uses independent Internet content-identity probes, then bounded
-NCSI redirect → NCSI content → NeverSSL → direct WHUT discovery (4 seconds each,
-16-second discovery budget). It distinguishes online, trusted redirect, direct
-reachability, timeout, not-found, unreachable and untrusted redirect outcomes. Android first inspects the **selected Wi-Fi Network's**
-`VALIDATED` / `CAPTIVE_PORTAL` capabilities; neither the cellular default route nor
-HTTP 200 alone establishes Internet connectivity. Without a captive flag or validated
-capability, a network-bound HTTPS 204 probe is a fallback.
+1. Send a public HTTP probe without proxies or automatic redirects.
+2. Observe a 302 to `http://172.30.21.100/api/r/<nasId>?...`.
+3. Validate HTTP, exact host, default port, no userinfo/fragment, and raw path `^/api/r/[0-9]{1,10}$`.
+4. Parse dynamic `nasId`, `userip`, `acip`, `acname`, and `wlanacname`.
+5. Replay the bootstrap using the operation's cookie jar. Validate any response redirect; do not follow arbitrary destinations.
+6. Open `http://172.30.21.100/tpl/whut/login.html` with the derived session query in that same jar.
+7. GET `/tpl/whut/static/js/config.js`.
+8. Parse the active safe relative API base.
+9. GET `<base>/csrf-token`.
+10. GET `<base>/account/status?token=null`.
+11. If offline and login is requested, match a registered physical fingerprint, then POST `<base>/account/login` using the late-decrypted credential.
+12. Verify account/status again.
+13. Verify Internet recovery.
 
-Android accepts a system portal URL only as an untrusted hint, or reads one redirect
-from the NeverSSL probe. It never follows an arbitrary external redirect. Android
-rejects probe-relative redirects that do not immediately resolve to the exact WHUT
-portal. Windows also rejects redirects unless they immediately match its portal allowlist.
+`/api/r/<nasId>` is a **bootstrap redirector**. `/api/account/login` is an **authentication endpoint**. They are not interchangeable.
 
-The observed WHUT portal is:
+Historical private DHCP examples are anonymized: one observed environment used `/api/r/59` with `10.91.x.x`, another `/api/r/52` with `10.82.x.x`. No NAS, user address or BRAS value is hard-coded into discovery.
 
-```text
-http://172.30.21.100/tpl/whut/login.html?nasId=<session-specific-value>
+Internet preflight uses NCSI content and NeverSSL identity. Discovery priority is NCSI redirect → NCSI content → NeverSSL → direct WHUT. Each request has a 4-second timeout; discovery has a 16-second shared request budget, separate from up to 8 seconds of preflight. A public foreign redirect is ignored, never followed or trusted. An unrecognized destination on the WHUT host returns exit 13.
+
+Bootstrap forbids HTTPS, suffix hostnames, nondefault ports, path normalization (`..`), encoded lookalikes, userinfo and fragments. The canonical login allowlist retains HTTP/HTTPS default-port compatibility, exact host and exact raw page path. Relative handshake redirects must already have a known raw path before URI resolution.
+
+Direct page reachability without `nasId` permits diagnostics/status but cannot authorize a credential POST. Discovery reports `InternetOnline`, `PortalRedirectFound`, `WhutBootstrapFound`, `WhutPortalReachable`, `ProtocolChanged`, `ProbeTimeout`, `PortalUnreachable` or `PortalNotFound`. Exhausted discovery prioritizes timeout (31), then direct unavailability (30), then not-found (11).
+
+## Physical trust and configuration
+
+The bootstrap `userip` is a credential-free hint, not authentication. Select only active `Get-NetAdapter -Physical` candidates with usable IPv4/gateway data. Reject APIPA and `198.18.0.0/15`; virtual route ownership does not determine the fingerprint. A supplied hint must match one physical address exactly. Without a hint, select an unambiguous physical candidate using the existing private-address/route-metric preference.
+
+Config v3 stores `trustedNetworks[]`; each entry contains profile name (auxiliary), interface alias/type, recorded IPv4 address, actual CIDR prefix, default gateway and portal host. `setup -AddNetwork` is the explicit enrollment operation and preserves the existing account/password. Same-fingerprint registrations are deduplicated. Ordinary setup replaces the registrations with the current network.
+
+Reading v2 wraps its existing single fingerprint in the v3 list and atomically replaces only the config file. It does not decrypt or rewrite `credential.dat`. Version 1 remains readable; its profile names cannot authorize auto-login.
+
+Immediately before decryption, auto must match **one complete entry** by prefix, gateway, host and interface alias/type. Fields from different entries are never combined. Manual login may tolerate an alias/type change, but v3/v2 still require prefix/gateway/host consistency. Profile/SSID names never enroll networks or suffice for trust. DHCP host addresses may change within the registered prefix.
+
+## API base and protocol fingerprint
+
+After removing block comments, parse active declarations with:
+
+```regex
+(?m)^\s*(?:var|let|const)\s+host_url\s*=\s*['"]([^'"]+)['"]\s*;?
 ```
 
-Android requires HTTP, host exactly `172.30.21.100`, default port or 80, no userinfo,
-no fragment, and raw path exactly `/tpl/whut/login.html`. It rejects suffix hostnames,
-other private IPs, encoded/normalised lookalike paths, HTTPS hints, and alternate ports.
-Windows accepts HTTP/HTTPS default ports, exact host and raw login path, no userinfo
-or fragment, and rejects normalized/encoded path lookalikes. Windows automatic login
-also requires the v2 physical route, prefix, gateway and interface fingerprint; profile
-names are auxiliary. Manual v1 configuration support does not authorize auto-login.
+Line-commented declarations do not match. Deduplicate identical values with case-sensitive `Sort-Object -Unique`; multiple distinct paths mean `ProtocolChanged` (13). API paths are case-sensitive.
 
-`nasId` is discovered anew for each operation, URL-decoded, and submitted as a login
-field. Android requires exactly one nonblank value, limits its length, and rejects
-control characters. It is not an account identifier, password, Cookie or CSRF token;
-diagnostics may show it locally. Do not upload diagnostic dumps containing local state.
+Only nonempty ASCII relative path segments such as `/api` and `/eportal/api` are accepted. Reject absolute URLs, schemes, authorities, `//`, `..`, backslashes, percent escapes, query/fragment suffixes and root-only paths. Unsafe explicit config fails closed. If config is unavailable/unparseable, `/api` fallback requires an active matching CSRF response; status is then validated before credential release.
 
-## Session and API discovery
-
-1. GET the validated portal page to establish cookies.
-2. GET `/tpl/whut/static/js/config.js` on that same origin.
-3. Extract `host_url = '/api'` (single/double quotes), which supplies the API base path.
-4. GET `<base>/csrf-token`, with the portal Referer.
-5. Parse the JSON `csrf_token` string and retain it only within this operation.
-
-Android requires an unambiguous `host_url` assignment. A base is an ASCII absolute
-path containing segment characters `[A-Za-z0-9._~-]`; `..`, `//`, percent escapes,
-backslashes, queries, fragments, scheme/host and root-only paths are rejected.
-Missing config structure fails closed on Android. Windows accepts `/api` fallback
-only after actively validating its CSRF JSON shape, and validates status before releasing
-a credential. Unsafe or ambiguous config never enables fallback. Windows reports
-protocol errors as exit 13, independently of authentication rejection.
-
-Android maintains a per-operation Java `CookieManager` accepting only original-server
-cookies. There is no global CookieHandler. Each portal request sends appropriate
-cookies; probes receive no portal Cookie or CSRF header. All endpoint redirects are
-rejected, and the cookie jar is discarded after the finite operation.
-
-## Account status and login
-
-GET `<base>/account/status?token=null`, with:
-
-```text
-Accept: application/json, */*
-Referer: <validated portal URL>
-X-Requested-With: XMLHttpRequest
-X-Csrf-Token: <operation token>
-Cookie: <session cookies, if any>
-```
-
-Require HTTP 200 plus a well-formed JSON object with a numeric integer `code`.
-`code == 0` means the WHUT account reports online; other codes mean not online.
-Server `msg` strings are not trusted UI/log content. Additional fields are ignored.
-Android rejects missing, duplicate, nested-only, string, boolean and noninteger codes.
-
-After portal, config, CSRF and status fingerprints pass, and only if offline and login
-is requested, decrypt the saved password. POST `<base>/account/login` on the validated
-origin, with the preceding headers plus `Origin: http://172.30.21.100` and
-`Content-Type: application/x-www-form-urlencoded; charset=UTF-8`.
-
-| Form field | Value |
+| Endpoint | Required HTTP/JSON fingerprint |
 | --- | --- |
-| `username` | User-entered campus account |
-| `password` | Decrypted password; never persist plaintext |
-| `swtichip` | Empty string; spelling intentionally matches the observed API |
-| `nasId` | Newly discovered session value |
-| `userIpv4` | Empty string |
-| `userMac` | Empty string |
-| `captcha` | Empty string |
-| `captchaId` | Empty string |
+| `<base>/csrf-token` | HTTP 200; object with a nonblank string `csrf_token`, no control characters |
+| `<base>/account/status?token=null` | HTTP 200; object with integer `code` |
+| `<base>/account/login` | HTTP 200; object with integer `code` and string `msg` |
 
-HTTP 200 is insufficient. The login JSON must contain numeric `code == 0`; nonzero
-codes fail, including code 2 (additional verification may be required). Windows additionally
-requires a string `msg` but never logs or returns its raw content; malformed login/status/CSRF
-shapes and duplicate keys are protocol changes, not bad-password errors. Android v0.1
-does not solve CAPTCHAs or bypass verification.
+Duplicate top-level JSON keys and missing, malformed or wrongly typed fields return exit 13. Raw `msg` is never UI/log content. CSRF request failure uses 22; other unavailable APIs use 30. Authentication rejection is 20 only after a valid login response; code 2 requires additional verification (21).
 
-## Success and Internet verification
+## Authentication request and verification
 
-After successful POST, GET account status again and require `code == 0`. Android
-then checks the **same Wi-Fi** VALIDATED capability or GETs `https://connectivitycheck.gstatic.com/generate_204` over that Wi-Fi,
-with redirects disabled and platform TLS validation; require HTTP 204. If filtered, a single credential-free HTTP NCSI probe at `http://www.msftconnecttest.com/connecttest.txt` requires status 200 **and the exact body** `Microsoft Connect Test` (the Windows identity check). This HTTP fingerprint can be spoofed by a hostile network and is not cryptographic verification. If all capability/probe checks fail,
-the operation reports verification failure even if the account is online. Windows
-uses its existing direct Internet identity probes. Neither client reports full login
-success based on a POST response alone.
+Status/login use the validated portal Referer, JSON Accept header, `X-Requested-With: XMLHttpRequest`, `X-Csrf-Token`, and operation cookies. Login additionally supplies Origin and UTF-8 form content:
 
-For an already online account, Android still verifies Wi-Fi Internet before reporting
-authenticated. An already `VALIDATED` non-captive Wi-Fi can exit as `Online` without
-contacting WHUT. Android calls `reportCaptivePortalDismissed()` only after verified
-account/Internet success, and only when the system supplied a CaptivePortal handle.
-The system then performs its own revalidation; the app cannot force a default route.
+| Field | Value |
+| --- | --- |
+| `username` | Saved account |
+| `password` | Late-decrypted credential, never logged |
+| `nasId` | Current discovered session value |
+| `swtichip` | Empty; spelling matches the observed API |
+| `userIpv4`, `userMac`, `captcha`, `captchaId` | Empty |
 
-## Android network and system integration
+DPAPI `CurrentUser` remains the storage mechanism. The credential-specific POST converts SecureString through BSTR and mutable character/UTF-8 buffers, then clears owned buffers on success/failure. No generic logging or form helper receives a plaintext password string. No complete request body is attached to application exceptions.
 
-`ConnectivityManager` selects an existing Wi-Fi, preferring a unique captive network;
-a system-supplied `EXTRA_NETWORK` must itself be a usable Wi-Fi. No SSID/location
-permission is needed. Android 17+ (target 37) additionally requires the explicit `ACCESS_LOCAL_NETWORK` runtime grant to reach the private-IP portal; denial stops local requests. This does not enable SSID access or Wi-Fi scanning. An ambiguous or unavailable selection safely fails. Every
-request uses `Network.openConnection(url, Proxy.NO_PROXY)`. No global process binding,
-cellular fallback, Wi-Fi scanning, persistent service or periodic worker exists.
-Foreground callbacks are unregistered and operations cancelled when the Activity stops.
+After login code 0, wait once for 750 ms, require status code 0 and require an Internet identity probe to succeed. A POST alone never means authentication success. Already-online `auto` returns without decrypting credentials. There is no retry daemon.
 
-The exported compatibility Activity handles `ACTION_CAPTIVE_PORTAL_SIGN_IN` with
-`EXTRA_NETWORK`, `EXTRA_CAPTIVE_PORTAL` and an optional URL hint. It requires the
-signature system permission `CONNECTIVITY_INTERNAL` **on callers**, not as an app
-permission request. This prevents ordinary apps triggering saved-password login.
-Many Android/OEM builds explicitly launch their own captive portal component and
-will never route this action to WUTNet. The manifest filter does not make WUTNet a
-default handler. Manual launch/login is the reliable MVP entry point; no privileged
-workaround is attempted.
+## Android platform notes
+
+The existing Android source and CI are unchanged by Windows v1.3.2. Android uses a selected Wi-Fi Network, network-bound requests, Keystore-backed storage and its existing strict portal/config validation. Its system sign-in entry is permission-protected; installing the app does not force OEMs to select it. Windows bootstrap and multi-network changes are not implicitly ported to Android. See [Android usage](ANDROID.md) and [device testing](android-testing.md).
 
 ## Security limits
 
-WHUT's current portal uses **HTTP**. Credentials and session material travel without
-transport encryption. DPAPI/Keystore protect storage only; IP/path/config/API fingerprints
-are defence in depth, not cryptographic proof of server identity. A hostile access point
-can impersonate these fingerprints. Only use an authorised account on trusted WHUT Wi-Fi.
-
-Android's Network Security Config disables cleartext by default and explicitly lists
-the portal IP and two credential-free discovery probe hosts. A domain-config entry for
-a numeric IP is not a network firewall and may vary by OEM; the application validates
-every destination as well. No global cleartext opt-in is used.
-
-No passwords, Cookie values, CSRF values, POST bodies or raw portal messages are logged.
-Android has no persistent diagnostic log and no release verbose logging. Mutable
-password/POST buffers are wiped, but JVM/ART immutable encoding Strings cannot be
-reliably zeroed. Keystore decryption failure requires re-entry, never a plaintext fallback.
-
-References: [ConnectivityManager](https://developer.android.com/reference/android/net/ConnectivityManager#ACTION_CAPTIVE_PORTAL_SIGN_IN),
-[Network.openConnection](https://developer.android.com/reference/android/net/Network#openConnection(java.net.URL,%20java.net.Proxy)),
-[CaptivePortal](https://developer.android.com/reference/android/net/CaptivePortal),
-[Network Security Config](https://developer.android.com/privacy-and-security/security-config),
-[Android Keystore](https://developer.android.com/privacy-and-security/keystore).
+WHUT currently uses HTTP. DPAPI and Keystore protect storage only. IP/path/protocol/network fingerprints are defence-in-depth, not cryptographic server identity. Internet HTTP content checks can also be spoofed. Runtime and HTTP-stack memory copies cannot be guaranteed erased, and Windows routing may change after the physical trust check. No account, password, Cookie, CSRF value, complete user IP or raw authentication body is logged.
