@@ -2,7 +2,7 @@
 #requires -PSEdition Core
 <#
 .SYNOPSIS
-    WHUT-Net v0.1 - Lightweight Wuhan University of Technology campus network authenticator.
+    WHUT-Net v1.3.2 - Lightweight Wuhan University of Technology campus network authenticator.
 
 .DESCRIPTION
     Windows-only, zero third-party dependency PowerShell client for the WHUT captive portal.
@@ -20,7 +20,7 @@
     add transport encryption to a server that only exposes HTTP.
 
 .NOTES
-    Version: 0.1.1
+    Version: 1.3.2
     Target: PowerShell 7.2+ on Windows 10/11
 #>
 
@@ -36,7 +36,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$Script:Version = '0.1.1'
+$Script:Version = '1.3.2'
 $Script:AllowedPortalHosts = @('172.30.21.100')
 $Script:ExpectedPortalPath = '/tpl/whut/login.html'
 # Known WHUT wire protocol. All response shapes are checked before using their values.
@@ -62,7 +62,7 @@ $Script:RequestTimeoutSeconds = 5
 $Script:TaskName = 'WHUT-Net AutoLogin'
 
 if (-not $IsWindows) {
-    Write-Error 'WHUT-Net v0.1 is Windows-only because credential protection uses Windows DPAPI.'
+    Write-Error 'WHUT-Net v1.3.2 is Windows-only because credential protection uses Windows DPAPI.'
     exit 50
 }
 
@@ -133,53 +133,172 @@ function Get-IPv4Prefix {
     return '{0}/{1}' -f ([System.Net.IPAddress]::new($bytes)), $PrefixLength
 }
 
-function Get-CurrentNetworkFingerprint {
-    # Select the route to WHUT, rather than any other simultaneously active adapter.
-    # No SSID scanning, elevation, or persistent network changes are needed.
+function Test-UsablePhysicalIPv4 {
+    param([Parameter(Mandatory)][string]$Address)
     try {
-        $route = @(Find-NetRoute -RemoteIPAddress $Script:AllowedPortalHosts[0] -ErrorAction Stop)
-        $address = @($route | Where-Object { $null -ne $_.PSObject.Properties['IPAddress'] })
-        if ($address.Count -ne 1) { return $null }
-        $address = $address[0]
-        $adapters = @(Get-NetAdapter -Physical -ErrorAction Stop | Where-Object {
-            $_.Status -eq 'Up' -and $_.ifIndex -eq $address.InterfaceIndex
-        })
-        if ($adapters.Count -ne 1) { return $null }
-        $adapter = $adapters[0]
-        $ipConfig = Get-NetIPConfiguration -InterfaceIndex $address.InterfaceIndex -ErrorAction Stop
-        $gateways = @($ipConfig.IPv4DefaultGateway | ForEach-Object { $_.NextHop } | Sort-Object -Unique)
-        if ($gateways.Count -ne 1) { return $null }
-        $profiles = @(Get-NetConnectionProfile -InterfaceIndex $address.InterfaceIndex -ErrorAction SilentlyContinue)
-        return [pscustomobject]@{
-            profileName = if ($profiles.Count -eq 1) { [string]$profiles[0].Name } else { '' }
-            interfaceAlias = [string]$adapter.Name
-            interfaceType = [string]$adapter.InterfaceType
-            ipv4Address = [string]$address.IPAddress
-            ipv4Prefix = Get-IPv4Prefix $address.IPAddress $address.PrefixLength
-            defaultGateway = [string]$gateways[0]
-            portalHost = $Script:AllowedPortalHosts[0]
+        $ip = [System.Net.IPAddress]::Parse($Address)
+        if ($ip.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) { return $false }
+        $b = $ip.GetAddressBytes()
+        if ($b[0] -eq 0 -or $b[0] -eq 127 -or $b[0] -ge 224) { return $false }
+        if ($b[0] -eq 169 -and $b[1] -eq 254) { return $false } # APIPA
+        if ($b[0] -eq 198 -and $b[1] -in 18,19) { return $false } # RFC 2544 / common TUN range
+        return $true
+    }
+    catch { return $false }
+}
+
+function Test-PrivateIPv4 {
+    param([Parameter(Mandatory)][string]$Address)
+    try {
+        $b = ([System.Net.IPAddress]::Parse($Address)).GetAddressBytes()
+        return (
+            $b[0] -eq 10 -or
+            ($b[0] -eq 172 -and $b[1] -ge 16 -and $b[1] -le 31) -or
+            ($b[0] -eq 192 -and $b[1] -eq 168)
+        )
+    }
+    catch { return $false }
+}
+
+function Get-PhysicalNetworkCandidates {
+    $items = [Collections.Generic.List[object]]::new()
+    try {
+        $adapters = @(Get-NetAdapter -Physical -ErrorAction Stop | Where-Object { $_.Status -eq 'Up' })
+        foreach ($adapter in $adapters) {
+            $ipConfig = Get-NetIPConfiguration -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue
+            if ($null -eq $ipConfig) { continue }
+
+            $gateways = @(
+                $ipConfig.IPv4DefaultGateway |
+                    ForEach-Object { [string]$_.NextHop } |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                    Sort-Object -Unique
+            )
+            if ($gateways.Count -ne 1) { continue }
+
+            $addresses = @(
+                $ipConfig.IPv4Address |
+                    Where-Object {
+                        $null -ne $_ -and
+                        (Test-UsablePhysicalIPv4 -Address ([string]$_.IPAddress))
+                    }
+            )
+            if ($addresses.Count -eq 0) { continue }
+
+            $profile = @(Get-NetConnectionProfile -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue)
+            $profileName = if ($profile.Count -eq 1) { [string]$profile[0].Name } else { '' }
+
+            $routeMetric = [int]::MaxValue
+            try {
+                $routes = @(
+                    Get-NetRoute -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction Stop |
+                        Where-Object { $_.DestinationPrefix -eq '0.0.0.0/0' }
+                )
+                if ($routes.Count -gt 0) {
+                    $routeMetric = [int](($routes | Measure-Object -Property RouteMetric -Minimum).Minimum)
+                }
+            }
+            catch {}
+
+            $interfaceMetric = 0
+            try {
+                $ipInterface = Get-NetIPInterface -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction Stop
+                $interfaceMetric = [int]$ipInterface.InterfaceMetric
+            }
+            catch {}
+
+            foreach ($address in $addresses) {
+                $addr = [string]$address.IPAddress
+                $items.Add([pscustomobject]@{
+                    profileName    = $profileName
+                    interfaceAlias = [string]$adapter.Name
+                    interfaceType  = [string]$adapter.InterfaceType
+                    interfaceIndex = [int]$adapter.ifIndex
+                    ipv4Address    = $addr
+                    prefixLength   = [int]$address.PrefixLength
+                    ipv4Prefix     = Get-IPv4Prefix $addr ([int]$address.PrefixLength)
+                    defaultGateway = [string]$gateways[0]
+                    portalHost     = $Script:AllowedPortalHosts[0]
+                    privateIPv4    = Test-PrivateIPv4 -Address $addr
+                    metric         = [long]$routeMetric + [long]$interfaceMetric
+                })
+            }
         }
     }
-    catch { return $null }
+    catch {}
+    return @($items)
+}
+
+function Get-CurrentNetworkFingerprint {
+    param([string]$UserIpHint)
+
+    # Do not trust Find-NetRoute alone: Clash/Mihomo/WireGuard/TUN adapters can own
+    # the best route to the portal. Select from physical adapters first.
+    $candidates = @(Get-PhysicalNetworkCandidates)
+    if ($candidates.Count -eq 0) { return $null }
+
+    $selected = $null
+
+    # WHUT's credential-free bootstrap exposes the campus-side userip. Prefer the
+    # physical adapter that owns that exact address.
+    if (-not [string]::IsNullOrWhiteSpace($UserIpHint)) {
+        $matched = @($candidates | Where-Object { $_.ipv4Address -ceq $UserIpHint })
+        if ($matched.Count -eq 1) { $selected = $matched[0] }
+        else { return $null } # A supplied campus hint must match exactly; never substitute another uplink.
+    }
+
+    if ($null -eq $selected) {
+        if ($candidates.Count -eq 1) {
+            $selected = $candidates[0]
+        }
+        else {
+            $private = @($candidates | Where-Object { $_.privateIPv4 })
+            $pool = if ($private.Count -gt 0) { $private } else { $candidates }
+            $sorted = @($pool | Sort-Object metric, interfaceIndex)
+            if ($sorted.Count -eq 0) { return $null }
+            if ($sorted.Count -gt 1 -and $sorted[0].metric -eq $sorted[1].metric) {
+                return $null
+            }
+            $selected = $sorted[0]
+        }
+    }
+
+    return [pscustomobject]@{
+        profileName    = $selected.profileName
+        interfaceAlias = $selected.interfaceAlias
+        interfaceType  = $selected.interfaceType
+        ipv4Address    = $selected.ipv4Address
+        ipv4Prefix     = $selected.ipv4Prefix
+        defaultGateway = $selected.defaultGateway
+        portalHost     = $selected.portalHost
+    }
 }
 
 function Test-TrustedLocalNetwork {
-    param($Config, [switch]$Automatic)
-    $current = Get-CurrentNetworkFingerprint
+    param($Config, [switch]$Automatic, [string]$UserIpHint)
+
+    $current = Get-CurrentNetworkFingerprint -UserIpHint $UserIpHint
     if ($null -eq $current) { return $false }
+
     if ((Get-ObjectProperty $Config 'version' 1) -eq 1) {
         # Profile-only configurations remain readable, but cannot authorize automation.
         return (-not $Automatic)
     }
+
     $trusted = Get-ObjectProperty $Config 'trustedNetwork'
     if ($null -eq $trusted) { return $false }
-    # A DHCP address may change within its real prefix. A renamed profile is harmless.
+
+    # DHCP host addresses and Windows profile suffixes may change. Prefix/gateway are
+    # primary trust anchors. Automatic mode additionally checks interface identity.
     $fields = @('ipv4Prefix', 'defaultGateway', 'portalHost')
     if ($Automatic) { $fields += @('interfaceAlias', 'interfaceType') }
+
     foreach ($field in $fields) {
         $expected = [string](Get-ObjectProperty $trusted $field '')
         if ([string]::IsNullOrWhiteSpace($expected) -or
-            $expected -cne [string](Get-ObjectProperty $current $field '')) { return $false }
+            $expected -cne [string](Get-ObjectProperty $current $field '')) {
+            return $false
+        }
     }
     return $true
 }
@@ -366,6 +485,138 @@ function Test-TrustedPortalUri {
     return ($Uri.AbsolutePath -ceq $Script:ExpectedPortalPath)
 }
 
+function Test-TrustedBootstrapUri {
+    param([Parameter(Mandatory)][Uri]$Uri)
+
+    if (-not $Uri.IsAbsoluteUri) { return $false }
+    if ($Uri.Scheme -cne 'http') { return $false }
+    if ($Uri.UserInfo -or $Uri.Fragment -or -not $Uri.IsDefaultPort) { return $false }
+    if ($Script:AllowedPortalHosts -cnotcontains $Uri.Host) { return $false }
+
+    $raw = $Uri.OriginalString
+    if ($raw -match '[\x00-\x20\x7f]' -or
+        $raw -cnotmatch '^http://172\.30\.21\.100(?::80)?/api/r/[0-9]{1,10}(?:\?[^#\\]*)?\z') {
+        return $false
+    }
+
+    return ($Uri.AbsolutePath -cmatch '^/api/r/[0-9]{1,10}\z')
+}
+
+function Test-SafeWhutRedirectLocation {
+    param([string]$Location)
+    # Absolute destinations still pass the full URI allowlist below. For relative
+    # redirects, prevent System.Uri from normalizing a lookalike into an allowed path.
+    if ($Location -cmatch '^https?://') { return $true }
+    return ($Location -cmatch '^/(?:api/r/[0-9]{1,10}|tpl/whut/login\.html)(?:\?[^#\\\x00-\x20\x7f]*)?\z')
+}
+
+function Get-WhutBootstrapMetadata {
+    param([Parameter(Mandatory)][Uri]$Uri)
+
+    if (-not (Test-TrustedBootstrapUri -Uri $Uri)) {
+        Throw-Whut 12 'Untrusted WHUT bootstrap URI.'
+    }
+
+    $nasId = $Uri.AbsolutePath.Substring('/api/r/'.Length)
+    $userIp = Get-QueryValue -Uri $Uri -Name 'userip'
+
+    if (-not [string]::IsNullOrWhiteSpace($userIp)) {
+        try {
+            $parsed = [System.Net.IPAddress]::Parse($userIp)
+            if ($parsed.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
+                throw 'not IPv4'
+            }
+        }
+        catch {
+            Throw-Whut 13 'ProtocolChanged: bootstrap userip is invalid.'
+        }
+    }
+
+    return [pscustomobject]@{
+        NasId      = $nasId
+        UserIp     = $userIp
+        AcIp       = Get-QueryValue -Uri $Uri -Name 'acip'
+        AcName     = Get-QueryValue -Uri $Uri -Name 'acname'
+        WlanAcName = Get-QueryValue -Uri $Uri -Name 'wlanacname'
+    }
+}
+
+function Convert-BootstrapToPortalUri {
+    param([Parameter(Mandatory)][Uri]$BootstrapUri)
+
+    $meta = Get-WhutBootstrapMetadata -Uri $BootstrapUri
+    $pairs = [Collections.Generic.List[string]]::new()
+
+    function Add-QueryPair([string]$Name, [AllowNull()][string]$Value, [switch]$IncludeEmpty) {
+        if ($null -eq $Value) { return }
+        if (-not $IncludeEmpty -and [string]::IsNullOrWhiteSpace($Value)) { return }
+        $pairs.Add(
+            ([Uri]::EscapeDataString($Name)) + '=' +
+            ([Uri]::EscapeDataString([string]$Value))
+        )
+    }
+
+    Add-QueryPair 'acip' $meta.AcIp
+    Add-QueryPair 'acname' $meta.AcName
+    if (-not [string]::IsNullOrWhiteSpace($meta.UserIp)) {
+        Add-QueryPair 'ip' $meta.UserIp
+    }
+    Add-QueryPair 'nasId' $meta.NasId
+    Add-QueryPair 'userip' $meta.UserIp
+    Add-QueryPair 'wlanacname' $meta.WlanAcName -IncludeEmpty
+
+    $query = $pairs -join '&'
+    $portal = [Uri](
+        "http://{0}{1}{2}" -f
+        $Script:AllowedPortalHosts[0],
+        $Script:ExpectedPortalPath,
+        $(if ($query) { "?$query" } else { '' })
+    )
+
+    if (-not (Test-TrustedPortalUri -Uri $portal)) {
+        Throw-Whut 13 'ProtocolChanged: derived WHUT portal URI did not pass validation.'
+    }
+
+    return $portal
+}
+
+function Get-WhutNetworkHint {
+    # Credential-free helper for setup. It lets WHUT's bootstrap identify the actual
+    # campus-side physical IPv4 even when a TUN adapter owns the route table.
+    $context = $null
+    try {
+        $context = New-HttpContext -TimeoutSeconds $Script:DiscoveryProbeSeconds
+        $probe = $Script:PortalProbes[1] # NCSI content probe
+        $result = Invoke-HttpText $context GET $probe.Uri `
+            -TimeoutMilliseconds ($Script:DiscoveryProbeSeconds * 1000)
+
+        if ($result.StatusCode -ge 300 -and $result.StatusCode -lt 400 -and
+            $null -ne $result.Location) {
+
+            $candidate = $null
+            if ([Uri]::TryCreate([string]$result.Location, [UriKind]::Absolute, [ref]$candidate)) {
+                if (Test-TrustedBootstrapUri -Uri $candidate) {
+                    return (Get-WhutBootstrapMetadata -Uri $candidate).UserIp
+                }
+
+                if (Test-TrustedPortalUri -Uri $candidate) {
+                    $hint = Get-QueryValue -Uri $candidate -Name 'userip'
+                    if ([string]::IsNullOrWhiteSpace($hint)) {
+                        $hint = Get-QueryValue -Uri $candidate -Name 'ip'
+                    }
+                    return $hint
+                }
+            }
+        }
+    }
+    catch {}
+    finally {
+        Close-HttpContext $context
+    }
+
+    return $null
+}
+
 function Test-SafeApiBasePath {
     param([AllowEmptyString()][string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path) -or $Path.Contains('..')) { return $false }
@@ -407,36 +658,67 @@ function Get-Origin {
 }
 
 function Test-Internet {
-    # Independent, credential-free preflight: a failed NCSI must not suppress NeverSSL.
+    # Credential-free preflight answers only whether Internet access is proven.
+    # Redirects are not followed and never authorize a credential destination.
     foreach ($probe in @($Script:PortalProbes[1], $Script:PortalProbes[2])) {
         $context = $null
         try {
             $context = New-HttpContext -TimeoutSeconds $Script:DiscoveryProbeSeconds
-            $result = Invoke-HttpText $context GET $probe.Uri -TimeoutMilliseconds ($Script:DiscoveryProbeSeconds * 1000)
-            if (Test-InternetResponse $probe.Name $result) { return $true }
+            $result = Invoke-HttpText $context GET $probe.Uri `
+                -TimeoutMilliseconds ($Script:DiscoveryProbeSeconds * 1000)
+
+            if (Test-InternetResponse $probe.Name $result) {
+                return $true
+            }
+
             if ($result.StatusCode -ge 300 -and $result.StatusCode -lt 400) {
-                $candidate = $null
-                if ($null -eq $result.Location -or
-                    -not [Uri]::TryCreate([string]$result.Location, [UriKind]::Absolute, [ref]$candidate) -or
-                    -not (Test-TrustedPortalUri $candidate)) {
-                    Throw-Whut 12 'UntrustedRedirect during Internet preflight.'
+                if ($null -ne $result.Location) {
+                    $candidate = $null
+                    if ([Uri]::TryCreate([string]$result.Location, [UriKind]::Absolute, [ref]$candidate)) {
+                        if (Test-TrustedPortalUri -Uri $candidate) {
+                            Write-Log INFO "preflight=$($probe.Name) result=whut-portal-redirect"
+                            return $false
+                        }
+                        if (Test-TrustedBootstrapUri -Uri $candidate) {
+                            Write-Log INFO "preflight=$($probe.Name) result=whut-bootstrap-redirect"
+                            return $false
+                        }
+                        if ($Script:AllowedPortalHosts -ccontains $candidate.Host) {
+                            Throw-Whut 13 'ProtocolChanged: preflight returned an unknown WHUT destination.'
+                        }
+                    }
                 }
-                return $false
+
+                # A foreign/unknown redirect only means the expected Internet identity
+                # was not obtained. Do not trust/follow it, but continue discovery.
+                Write-Log WARN "preflight=$($probe.Name) result=redirect-ignored"
             }
         }
-        catch {
-            if ($_.Exception.Data['ExitCode'] -eq 12) { throw }
+        catch [System.OperationCanceledException] {
+            Write-Log WARN "preflight=$($probe.Name) result=timeout"
         }
-        finally { Close-HttpContext $context }
+        catch {
+            if ($_.Exception.Data['ExitCode'] -eq 13) { throw }
+            Write-Log WARN "preflight=$($probe.Name) result=unreachable"
+        }
+        finally {
+            Close-HttpContext $context
+        }
     }
+
     return $false
 }
 
 function Test-InternetResponse {
     param([string]$Probe, $Result)
+
     if ($Result.StatusCode -ne 200) { return $false }
-    if ($Probe -eq 'msft-connecttest') { return ($Result.Body.Trim() -ceq $Script:InternetProbeExpected) }
-    if ($Probe -eq 'neverssl') { return ($Result.Body -match '(?i)<title>\s*NeverSSL\s*</title>') }
+    if ($Probe -eq 'msft-connecttest') {
+        return ($Result.Body.Trim() -ceq $Script:InternetProbeExpected)
+    }
+    if ($Probe -eq 'neverssl') {
+        return ($Result.Body -match '(?i)<title>\s*NeverSSL\s*</title>')
+    }
     return $false
 }
 
@@ -444,76 +726,201 @@ function Find-WhutPortal {
     $timer = [Diagnostics.Stopwatch]::StartNew()
     $timedOut = $false
     $directUnavailable = $false
+
     foreach ($probe in $Script:PortalProbes) {
         $remaining = [int]($Script:DiscoveryBudgetSeconds * 1000 - $timer.ElapsedMilliseconds)
-        if ($remaining -le 0) { $timedOut = $true; break }
+        if ($remaining -le 0) {
+            $timedOut = $true
+            break
+        }
+
         $context = $null
         try {
             $context = New-HttpContext -TimeoutSeconds $Script:DiscoveryProbeSeconds
             $timeout = [Math]::Min($remaining, $Script:DiscoveryProbeSeconds * 1000)
             $result = Invoke-HttpText $context GET $probe.Uri -TimeoutMilliseconds $timeout
+
             if ($result.StatusCode -ge 300 -and $result.StatusCode -lt 400) {
                 Write-Log INFO "probe=$($probe.Name) result=redirect"
+
+                if ($null -eq $result.Location) {
+                    Write-Log WARN "probe=$($probe.Name) result=redirect-without-location"
+                    continue
+                }
+
                 $candidate = $null
-                if ($null -ne $result.Location) {
-                    $location = [string]$result.Location
-                    # Do not let URI resolution normalize a relative lookalike into the allowlist.
-                    if ($location -cmatch '^/tpl/whut/login\.html(?:\?[^#\\]*)?\z' -or
-                        $location -cmatch '^https?://') {
-                        [void][Uri]::TryCreate($probe.Uri, $location, [ref]$candidate)
+                $location = [string]$result.Location
+                if (-not [Uri]::TryCreate($probe.Uri, $location, [ref]$candidate)) {
+                    Write-Log WARN "probe=$($probe.Name) result=invalid-redirect-ignored"
+                    continue
+                }
+
+                $safeLocation = Test-SafeWhutRedirectLocation $location
+                if ($safeLocation -and (Test-TrustedPortalUri -Uri $candidate)) {
+                    Write-Log INFO 'portal=trusted result=PortalRedirectFound'
+
+                    $userIpHint = Get-QueryValue -Uri $candidate -Name 'userip'
+                    if ([string]::IsNullOrWhiteSpace($userIpHint)) {
+                        $userIpHint = Get-QueryValue -Uri $candidate -Name 'ip'
+                    }
+
+                    return [pscustomobject]@{
+                        State      = 'PortalRedirectFound'
+                        Portal     = $candidate
+                        NasId      = Get-QueryValue -Uri $candidate -Name 'nasId'
+                        UserIpHint = $userIpHint
+                        Bootstrap  = $null
+                        ExitCode   = 0
                     }
                 }
-                if ($null -eq $candidate -or -not (Test-TrustedPortalUri $candidate)) {
-                    Write-Log WARN 'portal=untrusted result=UntrustedRedirect'
-                    return [pscustomobject]@{ State = 'UntrustedRedirect'; Portal = $null; ExitCode = 12 }
+
+                if ($safeLocation -and (Test-TrustedBootstrapUri -Uri $candidate)) {
+                    $meta = Get-WhutBootstrapMetadata -Uri $candidate
+                    $portal = Convert-BootstrapToPortalUri -BootstrapUri $candidate
+                    Write-Log INFO "portal=trusted result=WhutBootstrapFound nasId=$($meta.NasId)"
+
+                    return [pscustomobject]@{
+                        State      = 'WhutBootstrapFound'
+                        Portal     = $portal
+                        NasId      = $meta.NasId
+                        UserIpHint = $meta.UserIp
+                        Bootstrap  = $candidate
+                        ExitCode   = 0
+                    }
                 }
-                Write-Log INFO 'portal=trusted result=PortalRedirectFound'
-                return [pscustomobject]@{ State = 'PortalRedirectFound'; Portal = $candidate; ExitCode = 0 }
+
+                # A redirect to the allowlisted WHUT host on an unknown path is
+                # evidence of protocol drift and should fail closed.
+                if ($Script:AllowedPortalHosts -ccontains $candidate.Host) {
+                    Write-Log WARN "probe=$($probe.Name) result=unknown-whut-path"
+                    return [pscustomobject]@{
+                        State      = 'ProtocolChanged'
+                        Portal     = $null
+                        NasId      = $null
+                        UserIpHint = $null
+                        Bootstrap  = $null
+                        ExitCode   = 13
+                    }
+                }
+
+                Write-Log WARN "probe=$($probe.Name) result=foreign-redirect-ignored"
+                continue
             }
+
             if (Test-InternetResponse $probe.Name $result) {
                 Write-Log INFO "probe=$($probe.Name) result=InternetOnline"
-                return [pscustomobject]@{ State = 'InternetOnline'; Portal = $null; ExitCode = 0 }
+                return [pscustomobject]@{
+                    State = 'InternetOnline'; Portal = $null; NasId = $null
+                    UserIpHint = $null; Bootstrap = $null; ExitCode = 0
+                }
             }
+
             if ($probe.Name -eq 'whut-direct' -and $result.StatusCode -eq 200) {
                 Write-Log INFO 'probe=whut-direct result=WhutPortalReachable portal=trusted'
-                return [pscustomobject]@{ State = 'WhutPortalReachable'; Portal = $probe.Uri; ExitCode = 0 }
+                return [pscustomobject]@{
+                    State      = 'WhutPortalReachable'
+                    Portal     = $probe.Uri
+                    NasId      = $null
+                    UserIpHint = $null
+                    Bootstrap  = $null
+                    ExitCode   = 0
+                }
             }
+
             Write-Log INFO "probe=$($probe.Name) result=http-$($result.StatusCode)"
-            if ($probe.Name -eq 'whut-direct' -and $result.StatusCode -ge 500) { $directUnavailable = $true }
+            if ($probe.Name -eq 'whut-direct' -and $result.StatusCode -ge 500) {
+                $directUnavailable = $true
+            }
         }
         catch [System.OperationCanceledException] {
             $timedOut = $true
             Write-Log WARN "probe=$($probe.Name) result=timeout state=ProbeTimeout"
         }
         catch {
+            if ($_.Exception.Data['ExitCode'] -eq 13) { throw }
             Write-Log WARN "probe=$($probe.Name) result=unreachable"
-            if ($probe.Name -eq 'whut-direct') { $directUnavailable = $true }
+            if ($probe.Name -eq 'whut-direct') {
+                $directUnavailable = $true
+            }
         }
-        finally { Close-HttpContext $context }
+        finally {
+            Close-HttpContext $context
+        }
     }
-    # Preserve timeouts in the final result instead of collapsing them into not-found.
-    $state = if ($timedOut) { 'ProbeTimeout' } elseif ($directUnavailable) { 'PortalUnreachable' } else { 'PortalNotFound' }
+
+    $state = if ($timedOut) {
+        'ProbeTimeout'
+    }
+    elseif ($directUnavailable) {
+        'PortalUnreachable'
+    }
+    else {
+        'PortalNotFound'
+    }
+
     $code = if ($timedOut) { 31 } elseif ($directUnavailable) { 30 } else { 11 }
     Write-Log WARN "discovery=$state"
-    return [pscustomobject]@{ State = $state; Portal = $null; ExitCode = $code }
+
+    return [pscustomobject]@{
+        State = $state; Portal = $null; NasId = $null
+        UserIpHint = $null; Bootstrap = $null; ExitCode = $code
+    }
 }
 
 function Start-WhutSession {
     param(
         [Parameter(Mandatory)]
-        [Uri]$PortalUri
+        [Uri]$PortalUri,
+        [Uri]$BootstrapUri
     )
 
     if (-not (Test-TrustedPortalUri -Uri $PortalUri)) {
         Throw-Whut 12 'Refusing to start a session with an untrusted portal.'
     }
 
+    if ($null -ne $BootstrapUri -and -not (Test-TrustedBootstrapUri -Uri $BootstrapUri)) {
+        Throw-Whut 12 'Refusing to start a session with an untrusted bootstrap URI.'
+    }
+
     $context = New-HttpContext
 
     try {
+        # Replay /api/r/<nasId> in the same cookie jar. No credential exists yet.
+        if ($null -ne $BootstrapUri) {
+            $bootstrapResult = Invoke-HttpText -Context $context -Method GET -Uri $BootstrapUri -Headers @{
+                'Accept' = 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8'
+            }
+
+            if ($bootstrapResult.StatusCode -ge 300 -and $bootstrapResult.StatusCode -lt 400) {
+                if ($null -eq $bootstrapResult.Location) {
+                    Throw-Whut 13 'ProtocolChanged: WHUT bootstrap redirect has no Location.'
+                }
+
+                $next = $null
+                if (-not [Uri]::TryCreate(
+                    $BootstrapUri,
+                    [string]$bootstrapResult.Location,
+                    [ref]$next
+                )) {
+                    Throw-Whut 13 'ProtocolChanged: WHUT bootstrap redirect is invalid.'
+                }
+
+                if (-not (Test-SafeWhutRedirectLocation ([string]$bootstrapResult.Location)) -or
+                    (-not (Test-TrustedPortalUri -Uri $next) -and
+                     -not (Test-TrustedBootstrapUri -Uri $next))) {
+                    Throw-Whut 13 'ProtocolChanged: WHUT bootstrap redirected outside the known protocol.'
+                }
+
+                Write-Log INFO 'protocol=bootstrap-handshake redirect=validated'
+            }
+            elseif ($bootstrapResult.StatusCode -lt 200 -or $bootstrapResult.StatusCode -ge 400) {
+                Throw-Whut 30 "WHUT bootstrap handshake failed with HTTP $($bootstrapResult.StatusCode)."
+            }
+        }
+
         $headers = @{
-            'Accept'     = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-            'Referer'    = (Get-Origin -Uri $PortalUri) + '/'
+            'Accept'  = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            'Referer' = (Get-Origin -Uri $PortalUri) + '/'
         }
 
         $result = Invoke-HttpText -Context $context -Method GET -Uri $PortalUri -Headers $headers
@@ -525,7 +932,7 @@ function Start-WhutSession {
     }
     catch {
         Close-HttpContext $context
-        if ($_.Exception.Data['ExitCode'] -eq 30) { throw }
+        if ($null -ne $_.Exception.Data['ExitCode']) { throw }
         Throw-Whut 30 'WHUT portal handshake unavailable.'
     }
 }
@@ -538,10 +945,25 @@ function Get-ApiBasePath {
     try { $result = Invoke-HttpText $Context GET $configUri }
     catch { Write-Log WARN 'protocol=config-unavailable' }
     if ($null -ne $result -and $result.StatusCode -eq 200) {
-        $matches = [regex]::Matches($result.Body, '(?<![A-Za-z0-9_$])host_url\s*=\s*[''"]([^''"]*)[''"]')
-        if ($matches.Count -gt 1) { Throw-Whut 13 'ProtocolChanged: ambiguous API base.' }
-        if ($matches.Count -eq 1) {
-            $path = $matches[0].Groups[1].Value
+        # Only accept executable top-level var/let/const assignments. A commented-out
+        # WHUT test URL such as //var host_url = 'http://192.168.x.x/api' must not
+        # create a false ambiguity. Deduplicate identical active values.
+        $matches = [regex]::Matches(
+            ([regex]::Replace($result.Body, '(?s)/\*.*?\*/', '')),
+            '(?m)^\s*(?:var|let|const)\s+host_url\s*=\s*[''"]([^''"]+)[''"]\s*;?'
+        )
+        $paths = @(
+            $matches |
+                ForEach-Object { $_.Groups[1].Value } |
+                Sort-Object -Unique -CaseSensitive
+        )
+
+        if ($paths.Count -gt 1) {
+            Throw-Whut 13 'ProtocolChanged: multiple distinct API base paths.'
+        }
+
+        if ($paths.Count -eq 1) {
+            $path = $paths[0]
             if (-not (Test-SafeApiBasePath $path)) { Throw-Whut 12 'config.js returned an unsafe API base path.' }
             return $path
         }
@@ -640,13 +1062,13 @@ function Add-WhutFormBytes {
 
 function Invoke-WhutLogin {
     param($Context, [Uri]$PortalUri, [string]$ApiBasePath, [string]$CsrfToken,
-          [string]$NasId, [string]$User, $Config, [switch]$Automatic)
+          [string]$NasId, [string]$User, $Config, [switch]$Automatic, [string]$UserIpHint)
     $uri = Get-WhutApiUri $PortalUri $ApiBasePath $Script:WhutProtocol.LoginPath
     if ([string]::IsNullOrWhiteSpace($NasId) -or $NasId.Length -gt 1024 -or $NasId -match '[\x00-\x1f\x7f]') {
         Throw-Whut 11 'Trusted portal is reachable, but a valid session nasId was not discovered.'
     }
     # Re-read the actual route immediately before releasing the credential.
-    if (-not (Test-TrustedLocalNetwork $Config -Automatic:$Automatic)) {
+    if (-not (Test-TrustedLocalNetwork $Config -Automatic:$Automatic -UserIpHint $UserIpHint)) {
         Throw-Whut 12 'Current physical network fingerprint is not trusted. Run setup on WHUT.'
     }
     $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Post, $uri)
@@ -733,10 +1155,21 @@ function Resolve-PortalSession {
         Throw-Whut 12 'Discovered captive portal is not trusted.'
     }
 
-    $nasId = Get-QueryValue -Uri $portal -Name 'nasId'
-    # Direct reachability permits diagnostics; login still requires a discovered nasId.
+    $nasId = $discovery.NasId
+    if ([string]::IsNullOrWhiteSpace([string]$nasId)) {
+        $nasId = Get-QueryValue -Uri $portal -Name 'nasId'
+    }
 
-    $session = Start-WhutSession -PortalUri $portal
+    $userIpHint = $discovery.UserIpHint
+    if ([string]::IsNullOrWhiteSpace([string]$userIpHint)) {
+        $userIpHint = Get-QueryValue -Uri $portal -Name 'userip'
+        if ([string]::IsNullOrWhiteSpace([string]$userIpHint)) {
+            $userIpHint = Get-QueryValue -Uri $portal -Name 'ip'
+        }
+    }
+
+    # Direct reachability permits diagnostics; login still requires a discovered nasId.
+    $session = Start-WhutSession -PortalUri $portal -BootstrapUri $discovery.Bootstrap
 
     try {
         $apiBase = Get-ApiBasePath -Context $session -PortalUri $portal
@@ -747,6 +1180,8 @@ function Resolve-PortalSession {
             NasId       = $nasId
             ApiBasePath = $apiBase
             CsrfToken   = $csrf
+            UserIpHint  = $userIpHint
+            Bootstrap   = $discovery.Bootstrap
             Session     = $session
         }
     }
@@ -827,7 +1262,8 @@ function Invoke-LoginCommand {
             -CsrfToken $resolved.CsrfToken `
             -NasId $resolved.NasId `
             -User ([string](Get-ObjectProperty -Object $config -Name 'username')) `
-            -Config $config -Automatic:$Automatic)
+            -Config $config -Automatic:$Automatic `
+            -UserIpHint $resolved.UserIpHint)
 
         Start-Sleep -Milliseconds 750
 
@@ -877,7 +1313,10 @@ function Invoke-DiagnoseCommand {
         $resolved = Resolve-PortalSession
         if ($null -eq $resolved) { Write-Log INFO 'InternetOnline'; return 0 }
         Write-Host "Portal:     trusted ($($resolved.Portal.Host))"
+        Write-Host "Bootstrap:  $(if ($resolved.Bootstrap) { 'recognized /api/r/<nasId>' } else { 'not required / not observed' })"
         Write-Host "nasId:      $(if ($resolved.NasId) { 'present' } else { 'missing; login unavailable' })"
+        $fingerprint = Get-CurrentNetworkFingerprint -UserIpHint $resolved.UserIpHint
+        Write-Host "Physical:   $(if ($fingerprint) { 'OK (' + $fingerprint.interfaceAlias + ', ' + $fingerprint.ipv4Prefix + ')' } else { 'unresolved' })"
         Write-Host "API base:   $($resolved.ApiBasePath)"
         Write-Host 'CSRF:       OK (value intentionally hidden)'
 
@@ -922,7 +1361,8 @@ function Invoke-SetupCommand {
     }
 
     try {
-        $trustedNetwork = Get-CurrentNetworkFingerprint
+        $networkHint = Get-WhutNetworkHint
+        $trustedNetwork = Get-CurrentNetworkFingerprint -UserIpHint $networkHint
         $config = [ordered]@{
             version = 2
             username = $user
@@ -936,13 +1376,53 @@ function Invoke-SetupCommand {
     finally { $password.Dispose(); $password = $null; $encrypted = $null }
     Write-Log INFO 'Configuration v2 saved. Password is protected with Windows DPAPI CurrentUser.'
     if ($null -ne $trustedNetwork) {
-        Write-Log INFO 'Trusted physical route/network fingerprint saved.'
+        Write-Log INFO 'Trusted physical network fingerprint saved (TUN/VPN routes ignored).'
     }
     else {
-        Write-Log WARN 'No complete physical route fingerprint captured. Run setup again on WHUT before login/auto/install.'
+        Write-Log WARN 'No unambiguous physical network fingerprint captured. Disconnect extra physical uplinks or run setup again on WHUT.'
     }
     Write-Log WARN 'The WHUT portal currently uses HTTP; the network transport itself is not end-to-end encrypted.'
     return 0
+}
+
+function Resolve-PwshExecutable {
+    # App Execution Alias survives Store package upgrades and always returns a scalar.
+    $preferred = @(
+        (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\pwsh.exe'),
+        (Join-Path $PSHOME 'pwsh.exe')
+    )
+    foreach ($path in $preferred) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) { return [string]$path }
+    }
+
+    $candidates = @(
+        Get-Command pwsh.exe -All -CommandType Application -ErrorAction SilentlyContinue |
+            ForEach-Object { [string]$_.Source } |
+            Where-Object {
+                $_ -match '^[A-Za-z]:\\' -and $_ -notmatch '["\x00-\x1f\x7f]' -and
+                [IO.Path]::GetFileName($_) -ieq 'pwsh.exe' -and
+                (Test-Path -LiteralPath $_ -PathType Leaf)
+            } | Sort-Object -Unique
+    )
+    if ($candidates.Count -ne 1) {
+        Throw-Whut 50 'No unique PowerShell executable found. Enable the Store pwsh alias or install PowerShell 7.'
+    }
+    return [string]$candidates[0]
+}
+
+function New-WhutTaskActionSpec {
+    param([string]$ScriptPath = $PSCommandPath)
+    if ([string]::IsNullOrWhiteSpace($ScriptPath) -or
+        -not [IO.Path]::IsPathFullyQualified($ScriptPath) -or
+        $ScriptPath -match '["\x00-\x1f\x7f]' -or
+        -not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) {
+        Throw-Whut 50 'The script must be saved at a valid absolute path before installing the task.'
+    }
+    return [pscustomobject]@{
+        Execute = [string](Resolve-PwshExecutable)
+        Arguments = '-NoLogo -NoProfile -NonInteractive -File "{0}" auto' -f $ScriptPath
+        WorkingDirectory = [string](Split-Path -Parent $ScriptPath)
+    }
 }
 
 function Install-WhutScheduledTask {
@@ -956,9 +1436,7 @@ function Install-WhutScheduledTask {
         Throw-Whut 50 'Install requires a matching version 2 physical network fingerprint. Run setup on WHUT.'
     }
 
-    if ([string]::IsNullOrWhiteSpace($PSCommandPath) -or -not (Test-Path -LiteralPath $PSCommandPath)) {
-        Throw-Whut 50 'The script must be saved as a .ps1 file before installing the scheduled task.'
-    }
+    $actionSpec = New-WhutTaskActionSpec -ScriptPath $PSCommandPath
 
     $service = New-Object -ComObject 'Schedule.Service'
     $service.Connect()
@@ -967,7 +1445,7 @@ function Install-WhutScheduledTask {
 
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 
-    $task.RegistrationInfo.Description = 'WHUT-Net v0.1 auto-login on user logon and network connection.'
+    $task.RegistrationInfo.Description = "WHUT-Net v$Script:Version auto-login on user logon and network connection."
     $task.Settings.Enabled = $true
     $task.Settings.Hidden = $true
     $task.Settings.StartWhenAvailable = $true
@@ -997,9 +1475,9 @@ function Install-WhutScheduledTask {
 '@
 
     $action = $task.Actions.Create(0) # TASK_ACTION_EXEC
-    $action.Path = (Get-Command pwsh.exe -CommandType Application -ErrorAction Stop).Source
-    $action.Arguments = '-NoLogo -NoProfile -NonInteractive -File "{0}" auto' -f $PSCommandPath
-    $action.WorkingDirectory = Split-Path -Parent $PSCommandPath
+    $action.Path = $actionSpec.Execute
+    $action.Arguments = $actionSpec.Arguments
+    $action.WorkingDirectory = $actionSpec.WorkingDirectory
 
     # TASK_CREATE_OR_UPDATE = 6; no password is stored because this uses the current
     # interactive user's token.
@@ -1079,12 +1557,13 @@ Security:
   - Password at rest: Windows DPAPI CurrentUser.
   - Proxy variables are ignored for authentication traffic.
   - Credentials are sent only to the hard-coded allowlisted WHUT portal host.
-  - Auto requires a v2 physical route, IPv4 prefix, gateway and interface fingerprint.
+  - Auto requires a v2 physical IPv4 prefix, gateway and interface fingerprint.
   - Profile names are auxiliary; rerun setup to upgrade v1 without automatic migration.
-  - Discovery: NCSI redirect, NCSI content, NeverSSL, direct WHUT (4s each, 16s budget).
-  - Internet preflight has an additional 8s maximum; any untrusted discovery redirect stops.
-  - Protocol shapes are checked; /api fallback requires an active CSRF fingerprint.
-  - Fingerprints are defence-in-depth, not cryptographic server authentication.
+  - Discovery: NCSI redirect/content, NeverSSL, direct WHUT; /api/r/<nasId> bootstrap is recognized.
+  - Internet preflight never follows foreign redirects; unknown redirects are ignored and discovery continues.
+  - Protocol shapes are checked; commented-out config.js host_url test values are ignored.
+  - /api fallback requires an active CSRF fingerprint.
+  - Physical fingerprint selection ignores virtual/TUN routes; WHUT userip is used as a credential-free hint.
   - DPAPI protects storage only; managed strings cannot be guaranteed immediately erased.
   - CSRF token, cookies and password are never written to the log.
   - The current WHUT portal is HTTP, so transport confidentiality depends on WHUT.
