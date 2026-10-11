@@ -2,9 +2,9 @@ name: Windows PowerShell
 on:
   push:
     branches: [main, 'fix/**', 'release/**']
-    paths: ['whut-net.ps1', 'tests/**', '.github/workflows/windows.yml', 'README.md', 'docs/**']
+    paths: ['whut-net*.ps1', 'tests/**', '.github/workflows/windows.yml', 'README.md', 'docs/**']
   pull_request:
-    paths: ['whut-net.ps1', 'tests/**', '.github/workflows/windows.yml', 'README.md', 'docs/**']
+    paths: ['whut-net*.ps1', 'tests/**', '.github/workflows/windows.yml', 'README.md', 'docs/**']
 permissions:
   contents: read
 jobs:
@@ -20,7 +20,7 @@ jobs:
           fetch-depth: 0
       - name: PowerShell syntax
         run: |
-          $files = @('whut-net.ps1') + @(Get-ChildItem tests -Filter *.ps1 | ForEach-Object FullName)
+          $files = @(Get-ChildItem -Filter 'whut-net*.ps1' | ForEach-Object FullName) + @(Get-ChildItem tests -Filter *.ps1 | ForEach-Object FullName)
           foreach ($file in $files) {
             $tokens = $null
             $errors = $null

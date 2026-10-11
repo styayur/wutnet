@@ -76,4 +76,37 @@ class ProtocolTest {
         assertFalse(Protocol.allowedRequest(URI("http://evil.example/api")))
         assertFalse(Protocol.allowedRequest(URI("http://neverssl.com/evil")))
     }
+    @Test fun commentSafeConfigRetainsCaseSensitiveAmbiguityChecks() {
+        assertEquals("/api", Protocol.apiBase("//host_url='http://bad/api'\nvar host_url='/api';"))
+        assertEquals("/api", Protocol.apiBase("/* host_url='/test' */\nvar host_url='/api';"))
+        assertEquals("/api", Protocol.apiBase("host_url='/api'; host_url='/api'"))
+        rejects { Protocol.apiBase("host_url='/api'; host_url='/API'") }
+        rejects { Protocol.apiBase("//host_url='/api'") }
+    }
+    @Test fun dynamicBootstrapMetadataAndRawPathValidation() {
+        for (id in listOf("52", "59", "731")) {
+            val portal = Protocol.bootstrapPortal(URI("http://172.30.21.100/api/r/$id?userip=10.90.24.17&acname=A%2BB"))
+            assertEquals(id, Protocol.nasId(portal))
+            assertEquals("10.90.24.17", Protocol.query(portal, "ip"))
+            assertEquals("A+B", Protocol.query(portal, "acname"))
+        }
+        listOf("/api/r/%35%32", "/api/x/../r/52", "/api/r/52/", "/api/r/x").forEach {
+            assertFalse(Protocol.trustedBootstrap(URI("http://172.30.21.100$it")))
+        }
+        rejects { Protocol.bootstrapPortal(URI("http://172.30.21.100/api/r/52?userip=bad")) }
+        rejects { Protocol.bootstrapPortal(URI("http://172.30.21.100/api/r/52?userip=10.0.0.1&userip=10.0.0.2")) }
+        assertFalse(Protocol.trustedBootstrap(URI("http://172.30.21.100.evil.example/api/r/52")))
+    }
+    @Test fun physicalFingerprintToleratesDhcpButRejectsSubnetGatewayAndTunChanges() {
+        val first = Protocol.physicalFingerprint("10.82.155.225", 15, "10.82.0.1")
+        assertEquals("10.82.0.0/15|10.82.0.1|172.30.21.100|wifi", first)
+        assertEquals(first, Protocol.physicalFingerprint("10.83.2.3", 15, "10.82.0.1"))
+        assertNotEquals(first, Protocol.physicalFingerprint("10.91.2.3", 16, "10.91.0.1"))
+        assertNotEquals(first, Protocol.physicalFingerprint("10.82.155.225", 15, "10.82.0.2"))
+        assertEquals("10.91.22.0/23|10.91.0.1|172.30.21.100|wifi",
+            Protocol.physicalFingerprint("10.91.23.20", 23, "10.91.0.1"))
+        listOf("169.254.1.2", "198.18.0.1", "198.19.1.2", "127.0.0.1", "bad")
+            .forEach { assertNull(Protocol.physicalFingerprint(it, 24, "10.0.0.1")) }
+        assertNull(Protocol.physicalFingerprint("10.1.2.3", 33, "10.0.0.1"))
+    }
 }

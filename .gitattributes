@@ -3,3 +3,6 @@ android/gradlew text eol=lf
 *.sh text eol=lf
 *.jar binary
 *.bat text eol=crlf
+
+# Release scripts have identical bytes in Git and downloaded assets.
+whut-net*.ps1 text eol=lf

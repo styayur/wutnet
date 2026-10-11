@@ -1,6 +1,6 @@
 {
-  "source_version": "v1.3.2",
-  "reviewed_on": "2026-10-09",
+  "source_version": "v1.4.0",
+  "reviewed_on": "2026-10-11",
   "diagram_source": "README.md",
   "sources": [
     {
@@ -11,7 +11,7 @@
         "function Test-TrustedLocalNetwork",
         "function Test-TrustedBootstrapUri",
         "function Get-PhysicalNetworkCandidates",
-        "function Get-RegisteredNetworks",
+        "function Get-TrustedNetworks",
         "function Resolve-PwshExecutable",
         "function New-WhutTaskActionSpec",
         "function Read-ProtectedPassword",

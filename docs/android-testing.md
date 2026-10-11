@@ -65,3 +65,12 @@ Run this checklist on real WHUT Wi-Fi (including cellular coexistence), record o
 redacted protocol differences, and add regression fixtures. Then add device-side Keystore,
 network-loss and UI lifecycle tests. Consider a user-invoked Quick Settings Tile only
 after the authentication chain and OEM limitations are understood.
+
+## v1.4.0 device regression additions (pending)
+
+- On WHUT-WLAN, verify bootstrap/config/CSRF/status before the Trust and connect dialog. Cancel and confirm no login occurs; then explicitly accept and require status plus Internet success.
+- On WHUT-DORM, repeat registration. Revisit each network: either fingerprint must work without another registration. Merely copying an SSID must never grant trust.
+- A system sign-in launch on an unregistered network must stop without prompting/enrolling/decrypting. Open the ordinary app to register it explicitly.
+- Change network or DHCP subnet while the confirmation dialog is open. Approval for the old fingerprint must not register the new one. Lose Wi-Fi during a POST: no cellular retry.
+- Upgrade an existing v0.1 installation with the same signing key: retain the credential but require explicit first network enrollment. A different signing key requires uninstall/reinstall and clears state.
+- Clear credential and confirm both encrypted credential and network registrations are removed. Restart and confirm neither auto-login nor stored trust remains.
