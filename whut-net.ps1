@@ -2,7 +2,7 @@
 #requires -PSEdition Core
 <#
 .SYNOPSIS
-    WHUT-Net v1.3.2 - Lightweight Wuhan University of Technology campus network authenticator.
+    WHUT-Net v1.4.0 - Lightweight Wuhan University of Technology campus network authenticator.
 
 .DESCRIPTION
     Windows-only, zero third-party dependency PowerShell client for the WHUT captive portal.
@@ -13,32 +13,40 @@
       - Dynamic API base path discovery from config.js
       - CSRF + cookie session handling
       - DPAPI-protected password storage (CurrentUser)
-      - Login / status / auto / diagnose
-      - Optional Task Scheduler integration (logon + network-connect event)
+      - Multi-network trustedNetworks[] store for cross-campus roaming
+      - Smart Trust & Connect flow for newly verified WHUT networks
+      - Login / status / auto / diagnose + JSON machine output
+      - Task Scheduler auto-login with single-instance cooldown/backoff
 
     The current WHUT portal uses HTTP. DPAPI protects the password at rest, but cannot
     add transport encryption to a server that only exposes HTTP.
 
 .NOTES
-    Version: 1.3.2
+    Version: 1.4.0
     Target: PowerShell 7.2+ on Windows 10/11
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('help', 'setup', 'status', 'login', 'auto', 'diagnose', 'install', 'uninstall')]
-    [string]$Command = 'help',
+    [ValidateSet(
+        'run', 'help', 'setup', 'status', 'login', 'auto', 'diagnose',
+        'trust-current', 'networks', 'remove-network', 'install', 'uninstall'
+    )]
+    [string]$Command = 'run',
 
     [string]$Username,
-
-    [switch]$AddNetwork
+    [string]$NetworkId,
+    [string]$Label,
+    [switch]$AddNetwork,
+    [switch]$Json,
+    [switch]$Yes
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$Script:Version = '1.3.2'
+$Script:Version = '1.4.0'
 $Script:AllowedPortalHosts = @('172.30.21.100')
 $Script:ExpectedPortalPath = '/tpl/whut/login.html'
 # Known WHUT wire protocol. All response shapes are checked before using their values.
@@ -62,9 +70,12 @@ $Script:PortalProbes = @(
 $Script:InternetProbeExpected = 'Microsoft Connect Test'
 $Script:RequestTimeoutSeconds = 5
 $Script:TaskName = 'WHUT-Net AutoLogin'
+$Script:ConfigVersion = 3
+$Script:AutoCooldownSeconds = 30
+$Script:AutoBackoffSeconds = @(30, 120, 300)
 
 if (-not $IsWindows) {
-    Write-Error 'WHUT-Net v1.3.2 is Windows-only because credential protection uses Windows DPAPI.'
+    Write-Error 'WHUT-Net v1.4.0 is Windows-only because credential protection uses Windows DPAPI.'
     exit 50
 }
 
@@ -77,6 +88,8 @@ $Script:DataDir = Join-Path $env:LOCALAPPDATA 'WHUT-Net'
 $Script:ConfigPath = Join-Path $Script:DataDir 'config.json'
 $Script:CredentialPath = Join-Path $Script:DataDir 'credential.dat'
 $Script:LogPath = Join-Path $Script:DataDir 'whut-net.log'
+$Script:AutoStatePath = Join-Path $Script:DataDir 'auto-state.json'
+$Script:JsonMode = [bool]$Json
 
 function New-WhutException {
     param(
@@ -276,48 +289,229 @@ function Get-CurrentNetworkFingerprint {
     }
 }
 
+function Get-NetworkFingerprintId {
+    param([Parameter(Mandatory)]$Fingerprint)
+
+    $material = @(
+        [string](Get-ObjectProperty $Fingerprint 'ipv4Prefix' '')
+        [string](Get-ObjectProperty $Fingerprint 'defaultGateway' '')
+        [string](Get-ObjectProperty $Fingerprint 'portalHost' '')
+        [string](Get-ObjectProperty $Fingerprint 'interfaceType' '')
+    ) -join '|'
+
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($material)
+        $hash = $sha.ComputeHash($bytes)
+        return ([Convert]::ToHexString($hash).Substring(0, 12)).ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
+function New-TrustedNetworkEntry {
+    param(
+        [Parameter(Mandatory)]$Fingerprint,
+        [string]$RequestedLabel
+    )
+
+    $labelValue = $RequestedLabel
+    if ([string]::IsNullOrWhiteSpace($labelValue)) {
+        $labelValue = [string](Get-ObjectProperty $Fingerprint 'profileName' '')
+    }
+    if ([string]::IsNullOrWhiteSpace($labelValue)) {
+        $labelValue = '{0} {1}' -f `
+            [string](Get-ObjectProperty $Fingerprint 'interfaceAlias' 'Network'),
+            [string](Get-ObjectProperty $Fingerprint 'ipv4Prefix' '')
+    }
+
+    return [pscustomobject][ordered]@{
+        id              = Get-NetworkFingerprintId -Fingerprint $Fingerprint
+        label           = $labelValue.Trim()
+        profileName     = [string](Get-ObjectProperty $Fingerprint 'profileName' '')
+        interfaceAlias  = [string](Get-ObjectProperty $Fingerprint 'interfaceAlias' '')
+        interfaceType   = [string](Get-ObjectProperty $Fingerprint 'interfaceType' '')
+        ipv4Prefix      = [string](Get-ObjectProperty $Fingerprint 'ipv4Prefix' '')
+        defaultGateway  = [string](Get-ObjectProperty $Fingerprint 'defaultGateway' '')
+        portalHost      = [string](Get-ObjectProperty $Fingerprint 'portalHost' '')
+        lastSeen        = [DateTimeOffset]::UtcNow.ToString('o')
+    }
+}
+
+function Get-TrustedNetworks {
+    param([AllowNull()]$Config)
+
+    if ($null -eq $Config) { return @() }
+    $version = [int](Get-ObjectProperty $Config 'version' 1)
+
+    if ($version -ge 3) {
+        return @(
+            Get-ObjectProperty $Config 'trustedNetworks' @() |
+                Where-Object { $null -ne $_ } |
+                ForEach-Object {
+                    if ([string]::IsNullOrWhiteSpace([string](Get-ObjectProperty $_ 'id' ''))) {
+                        New-TrustedNetworkEntry -Fingerprint $_
+                    } else { $_ }
+                }
+        )
+    }
+
+    if ($version -eq 2) {
+        $single = Get-ObjectProperty $Config 'trustedNetwork'
+        if ($null -ne $single) {
+            $legacyLabel = [string](Get-ObjectProperty $single 'profileName' '')
+            return @(New-TrustedNetworkEntry -Fingerprint $single -RequestedLabel $legacyLabel)
+        }
+    }
+
+    return @()
+}
+
+function Test-NetworkFingerprintMatch {
+    param(
+        [Parameter(Mandatory)]$Trusted,
+        [Parameter(Mandatory)]$Current,
+        [switch]$Automatic
+    )
+
+    # Profile/SSID names are presentation only. A trusted network is identified by
+    # physical network characteristics plus the independently verified WHUT portal.
+    $fields = @('ipv4Prefix', 'defaultGateway', 'portalHost', 'interfaceType')
+    foreach ($field in $fields) {
+        $expected = [string](Get-ObjectProperty $Trusted $field '')
+        $actual = [string](Get-ObjectProperty $Current $field '')
+        if ([string]::IsNullOrWhiteSpace($expected) -or $expected -cne $actual) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Find-TrustedNetworkMatch {
+    param(
+        [Parameter(Mandatory)]$Config,
+        [Parameter(Mandatory)]$Current,
+        [switch]$Automatic
+    )
+
+    foreach ($trusted in @(Get-TrustedNetworks -Config $Config)) {
+        if (Test-NetworkFingerprintMatch -Trusted $trusted -Current $Current -Automatic:$Automatic) {
+            return $trusted
+        }
+    }
+    return $null
+}
+
 function Test-TrustedLocalNetwork {
     param($Config, [switch]$Automatic, [string]$UserIpHint)
 
     $current = Get-CurrentNetworkFingerprint -UserIpHint $UserIpHint
     if ($null -eq $current) { return $false }
 
-    if ((Get-ObjectProperty $Config 'version' 1) -eq 1) {
-        # Profile-only configurations remain readable, but cannot authorize automation.
-        return (-not $Automatic)
+    $version = [int](Get-ObjectProperty $Config 'version' 1)
+    if ($version -eq 1) {
+        # Legacy profile-only config remains readable for diagnostics but cannot
+        # authorize credential release.
+        return $false
     }
 
-    foreach ($trusted in @(Get-RegisteredNetworks $Config)) {
-        if (Test-NetworkFingerprintMatch $current $trusted -Automatic:$Automatic) { return $true }
-    }
-    return $false
+    return $null -ne (Find-TrustedNetworkMatch -Config $Config -Current $current -Automatic:$Automatic)
 }
 
-function Get-RegisteredNetworks {
+function Convert-ConfigToV3 {
+    param(
+        [Parameter(Mandatory)]$Config,
+        [AllowNull()][object[]]$TrustedNetworks
+    )
+
+    if ($null -eq $TrustedNetworks) {
+        $TrustedNetworks = @(Get-TrustedNetworks -Config $Config)
+    }
+
+    return [pscustomobject][ordered]@{
+        version         = 3
+        username        = [string](Get-ObjectProperty $Config 'username' '')
+        trustedNetworks = @($TrustedNetworks)
+    }
+}
+
+function Save-Config {
     param($Config)
-    if ((Get-ObjectProperty $Config 'version' 1) -eq 2) {
-        $single = Get-ObjectProperty $Config 'trustedNetwork'
-        if ($null -ne $single) { return $single }
-        return
+    Ensure-DataDirectory
+    # Replace in the same directory; never leave a partially written trust list.
+    $temporary = $Script:ConfigPath + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+    try {
+        $Config | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $temporary -Encoding utf8
+        if (Test-Path -LiteralPath $Script:ConfigPath) {
+            [IO.File]::Replace($temporary, $Script:ConfigPath, [NullString]::Value)
+        }
+        else { [IO.File]::Move($temporary, $Script:ConfigPath) }
     }
-    return @(Get-ObjectProperty $Config 'trustedNetworks' @()) | Where-Object { $null -ne $_ }
+    catch { Throw-Whut 50 'Could not save network configuration; existing configuration retained.' }
+    finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+    }
 }
 
-function Test-NetworkFingerprintMatch {
-    param($Current, $Trusted, [switch]$Automatic)
-    if ($null -eq $Current -or $null -eq $Trusted) { return $false }
-    # Profile names and DHCP host addresses never grant trust or add registrations.
-    $fields = @('ipv4Prefix', 'defaultGateway', 'portalHost')
-    if ($Automatic) { $fields += @('interfaceAlias', 'interfaceType') }
+function Add-TrustedNetworkToConfig {
+    param(
+        [Parameter(Mandatory)]$Config,
+        [Parameter(Mandatory)]$Fingerprint,
+        [string]$RequestedLabel
+    )
 
-    foreach ($field in $fields) {
-        $expected = [string](Get-ObjectProperty $Trusted $field '')
-        if ([string]::IsNullOrWhiteSpace($expected) -or
-            $expected -cne [string](Get-ObjectProperty $Current $field '')) {
-            return $false
+    $networks = [Collections.Generic.List[object]]::new()
+    foreach ($item in @(Get-TrustedNetworks -Config $Config)) {
+        $networks.Add($item)
+    }
+
+    $newEntry = New-TrustedNetworkEntry -Fingerprint $Fingerprint -RequestedLabel $RequestedLabel
+    $existingIndex = -1
+
+    for ($i = 0; $i -lt $networks.Count; $i++) {
+        if (Test-NetworkFingerprintMatch -Trusted $networks[$i] -Current $Fingerprint) {
+            $existingIndex = $i
+            break
         }
     }
-    return $true
+
+    if ($existingIndex -ge 0) {
+        $existing = $networks[$existingIndex]
+        if ([string]::IsNullOrWhiteSpace($RequestedLabel)) {
+            $newEntry.label = [string](Get-ObjectProperty $existing 'label' $newEntry.label)
+        }
+        $newEntry.id = [string](Get-ObjectProperty $existing 'id' $newEntry.id)
+        $networks[$existingIndex] = $newEntry
+    }
+    else {
+        $networks.Add($newEntry)
+    }
+
+    $v3 = Convert-ConfigToV3 -Config $Config -TrustedNetworks @($networks.ToArray())
+    Save-Config -Config $v3
+    return $newEntry
+}
+
+function Remove-TrustedNetworkFromConfig {
+    param(
+        [Parameter(Mandatory)]$Config,
+        [Parameter(Mandatory)][string]$Id
+    )
+
+    $remaining = @(
+        Get-TrustedNetworks -Config $Config |
+            Where-Object { [string](Get-ObjectProperty $_ 'id' '') -cne $Id }
+    )
+    $before = @(Get-TrustedNetworks -Config $Config).Count
+    if ($remaining.Count -eq $before) {
+        Throw-Whut 50 "Trusted network '$Id' was not found."
+    }
+
+    $v3 = Convert-ConfigToV3 -Config $Config -TrustedNetworks $remaining
+    Save-Config -Config $v3
+    return $remaining.Count
 }
 
 function Write-Log {
@@ -349,6 +543,8 @@ function Write-Log {
         # Logging must never break authentication.
     }
 
+    if ($Script:JsonMode) { $Quiet = $true }
+
     if (-not $Quiet) {
         switch ($Level) {
             'ERROR' { Write-Host "[ERROR] $safeMessage" -ForegroundColor Red }
@@ -375,38 +571,30 @@ function Read-Config {
         Throw-Whut 50 'Configuration is missing username.'
     }
 
-    $version = Get-ObjectProperty $config 'version' 1
-    if ($version -notin @(1, 2, 3)) { Throw-Whut 50 'Unsupported configuration version.' }
-    if ($version -eq 1) {
-        Write-Log WARN 'Version 1 configuration: run setup on WHUT to capture a network fingerprint before auto/install.'
+    $version = [int](Get-ObjectProperty $config 'version' 1)
+    if ($version -notin @(1, 2, 3)) {
+        Throw-Whut 50 'Unsupported configuration version.'
     }
-    if ($version -eq 2) {
-        $config = [pscustomobject]@{
-            version = 3
-            username = [string]$storedUsername
-            trustedNetworks = @(Get-RegisteredNetworks $config)
-        }
-        Write-Config $config
+
+    if ($version -eq 1) {
+        Write-Log WARN 'Legacy v1 configuration cannot authorize auto-login. Run setup or trust-current on WHUT.'
+    }
+    elseif ($version -eq 2) {
+        $config = Convert-ConfigToV3 -Config $config
+        Save-Config -Config $config
         Write-Log INFO 'Configuration migrated from v2 to v3; existing network and credential retained.'
     }
-    return $config
-}
-
-function Write-Config {
-    param($Config)
-    # Replace in the same directory; never leave a partially written trust list.
-    $temporary = $Script:ConfigPath + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
-    try {
-        $Config | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $temporary -Encoding utf8
-        if (Test-Path -LiteralPath $Script:ConfigPath) {
-            [IO.File]::Replace($temporary, $Script:ConfigPath, [NullString]::Value)
+    elseif ($version -eq 3) {
+        $missingMetadata = @(Get-ObjectProperty $config 'trustedNetworks' @() | Where-Object {
+            [string]::IsNullOrWhiteSpace([string](Get-ObjectProperty $_ 'id' ''))
+        })
+        if ($missingMetadata.Count -gt 0) {
+            $config = Convert-ConfigToV3 -Config $config
+            Save-Config -Config $config
         }
-        else { [IO.File]::Move($temporary, $Script:ConfigPath) }
     }
-    catch { Throw-Whut 50 'Could not save network configuration; existing configuration retained.' }
-    finally {
-        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
-    }
+
+    return $config
 }
 
 function Read-ProtectedPassword {
@@ -424,6 +612,115 @@ function Read-ProtectedPassword {
     catch {
         Throw-Whut 50 'Credential cannot be decrypted for the current Windows user. Run setup again.'
     }
+}
+
+function Write-ResultJson {
+    param([Parameter(Mandatory)]$Object)
+
+    # Dispatch stores a command's integer return value in $exitCode. Writing JSON
+    # through the success pipeline would therefore be captured together with that
+    # integer. Write directly to stdout so -Json remains machine-readable.
+    $json = $Object | ConvertTo-Json -Depth 8 -Compress
+    [Console]::Out.WriteLine($json)
+}
+
+function Test-TunLikeAdapterPresent {
+    try {
+        foreach ($cfg in @(Get-NetIPConfiguration -ErrorAction Stop)) {
+            foreach ($addr in @($cfg.IPv4Address)) {
+                if ($null -eq $addr) { continue }
+                $ip = [string]$addr.IPAddress
+                try {
+                    $b = ([System.Net.IPAddress]::Parse($ip)).GetAddressBytes()
+                    if ($b[0] -eq 198 -and $b[1] -in 18,19) { return $true }
+                }
+                catch {}
+            }
+        }
+    }
+    catch {}
+    return $false
+}
+
+function Resolve-PwshExecutable {
+    $alias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\pwsh.exe'
+    if (Test-Path -LiteralPath $alias) {
+        return [string]$alias
+    }
+
+    $homePwsh = Join-Path $PSHOME 'pwsh.exe'
+    if (Test-Path -LiteralPath $homePwsh) {
+        return [string]$homePwsh
+    }
+
+    $candidates = @(
+        Get-Command pwsh.exe -CommandType Application -All -ErrorAction SilentlyContinue |
+            ForEach-Object { [string]$_.Source } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_) } |
+            Sort-Object -Unique
+    )
+
+    if ($candidates.Count -eq 1) {
+        return [string]$candidates[0]
+    }
+
+    Throw-Whut 50 'Could not resolve a stable single pwsh.exe executable for Task Scheduler.'
+}
+
+function Get-AutoState {
+    if (-not (Test-Path -LiteralPath $Script:AutoStatePath)) {
+        return [pscustomobject]@{ failureCount = 0; nextAllowedUtc = $null }
+    }
+    try {
+        return Get-Content -LiteralPath $Script:AutoStatePath -Raw -Encoding utf8 | ConvertFrom-Json
+    }
+    catch {
+        return [pscustomobject]@{ failureCount = 0; nextAllowedUtc = $null }
+    }
+}
+
+function Save-AutoState {
+    param([int]$FailureCount, [AllowNull()][DateTimeOffset]$NextAllowedUtc)
+    Ensure-DataDirectory
+    [pscustomobject]@{
+        failureCount  = $FailureCount
+        nextAllowedUtc = if ($null -eq $NextAllowedUtc) { $null } else { $NextAllowedUtc.ToString('o') }
+    } | ConvertTo-Json | Set-Content -LiteralPath $Script:AutoStatePath -Encoding utf8
+}
+
+function Get-AutoCooldownRemaining {
+    $state = Get-AutoState
+    $raw = Get-ObjectProperty $state 'nextAllowedUtc'
+    if ([string]::IsNullOrWhiteSpace([string]$raw)) { return 0 }
+
+    try {
+        $next = [DateTimeOffset]::Parse([string]$raw)
+        $seconds = [int][Math]::Ceiling(($next - [DateTimeOffset]::UtcNow).TotalSeconds)
+        return [Math]::Max(0, $seconds)
+    }
+    catch { return 0 }
+}
+
+function Register-AutoSuccess {
+    Save-AutoState -FailureCount 0 -NextAllowedUtc ([DateTimeOffset]::UtcNow.AddSeconds($Script:AutoCooldownSeconds))
+}
+
+function Register-AutoFailure {
+    $state = Get-AutoState
+    $count = [int](Get-ObjectProperty $state 'failureCount' 0) + 1
+    $index = [Math]::Min($count - 1, $Script:AutoBackoffSeconds.Count - 1)
+    $delay = [int]$Script:AutoBackoffSeconds[$index]
+    Save-AutoState -FailureCount $count -NextAllowedUtc ([DateTimeOffset]::UtcNow.AddSeconds($delay))
+}
+
+function Enter-AutoMutex {
+    $created = $false
+    $mutex = [Threading.Mutex]::new($true, 'Local\WUTNet-Auto-v1', [ref]$created)
+    if (-not $created) {
+        $mutex.Dispose()
+        return $null
+    }
+    return $mutex
 }
 
 function New-HttpContext {
@@ -543,14 +840,6 @@ function Test-TrustedBootstrapUri {
     }
 
     return ($Uri.AbsolutePath -cmatch '^/api/r/[0-9]{1,10}\z')
-}
-
-function Test-SafeWhutRedirectLocation {
-    param([string]$Location)
-    # Absolute destinations still pass the full URI allowlist below. For relative
-    # redirects, prevent System.Uri from normalizing a lookalike into an allowed path.
-    if ($Location -cmatch '^https?://') { return $true }
-    return ($Location -cmatch '^/(?:api/r/[0-9]{1,10}|tpl/whut/login\.html)(?:\?[^#\\\x00-\x20\x7f]*)?\z')
 }
 
 function Get-WhutBootstrapMetadata {
@@ -763,6 +1052,14 @@ function Test-InternetResponse {
         return ($Result.Body -match '(?i)<title>\s*NeverSSL\s*</title>')
     }
     return $false
+}
+
+function Test-SafeWhutRedirectLocation {
+    param([string]$Location)
+    # Absolute destinations still pass the full URI allowlist below. For relative
+    # redirects, prevent System.Uri from normalizing a lookalike into an allowed path.
+    if ($Location -cmatch '^https?://') { return $true }
+    return ($Location -cmatch '^/(?:api/r/[0-9]{1,10}|tpl/whut/login\.html)(?:\?[^#\\\x00-\x20\x7f]*)?\z')
 }
 
 function Find-WhutPortal {
@@ -1110,9 +1407,9 @@ function Invoke-WhutLogin {
     if ([string]::IsNullOrWhiteSpace($NasId) -or $NasId.Length -gt 1024 -or $NasId -match '[\x00-\x1f\x7f]') {
         Throw-Whut 11 'Trusted portal is reachable, but a valid session nasId was not discovered.'
     }
-    # Re-read the actual route immediately before releasing the credential.
+    # Re-read the physical network immediately before releasing the credential.
     if (-not (Test-TrustedLocalNetwork $Config -Automatic:$Automatic -UserIpHint $UserIpHint)) {
-        Throw-Whut 12 'Current physical network fingerprint is not trusted. Run setup on WHUT.'
+        Throw-Whut 12 'Current physical network changed or is no longer trusted; credentials were not sent.'
     }
     $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Post, $uri)
     $response = $null
@@ -1234,23 +1531,162 @@ function Resolve-PortalSession {
     }
 }
 
+function Invoke-NetworksCommand {
+    $config = Read-Config
+    $networks = @(Get-TrustedNetworks -Config $config)
+
+    if ($Script:JsonMode) {
+        Write-ResultJson ([pscustomobject]@{
+            state = 'TrustedNetworks'
+            version = [int](Get-ObjectProperty $config 'version' 1)
+            count = $networks.Count
+            networks = $networks
+        })
+        return 0
+    }
+
+    if ($networks.Count -eq 0) {
+        Write-Host 'No trusted physical WHUT networks are registered.'
+        return 0
+    }
+
+    $networks |
+        Select-Object id, label, ipv4Prefix, defaultGateway, interfaceType, lastSeen |
+        Format-Table -AutoSize |
+        Out-Host
+    return 0
+}
+
+function Invoke-RemoveNetworkCommand {
+    param([string]$Id)
+
+    if ([string]::IsNullOrWhiteSpace($Id)) {
+        Throw-Whut 50 'remove-network requires -NetworkId <id>.'
+    }
+
+    $config = Read-Config
+    $remaining = Remove-TrustedNetworkFromConfig -Config $config -Id $Id
+
+    if ($Script:JsonMode) {
+        Write-ResultJson ([pscustomobject]@{
+            state = 'TrustedNetworkRemoved'
+            id = $Id
+            remaining = $remaining
+        })
+    }
+    else {
+        Write-Host "[INFO]  Trusted network '$Id' removed. Remaining: $remaining"
+    }
+    return 0
+}
+
+function Invoke-TrustCurrentCommand {
+    param([string]$RequestedLabel)
+
+    $config = Read-Config
+
+    if (Test-Internet) {
+        Throw-Whut 50 'Current Internet is already validated. Reconnect while captive so WHUT can be verified before trusting this network.'
+    }
+
+    $resolved = $null
+    try {
+        $resolved = Resolve-PortalSession
+        if ($null -eq $resolved) {
+            Throw-Whut 50 'No captive WHUT session is available to verify the current network.'
+        }
+
+        if ([string]::IsNullOrWhiteSpace([string]$resolved.NasId)) {
+            Throw-Whut 11 'A current WHUT session nasId is required before registering this network.'
+        }
+
+        # Require a valid status response before persisting the new network.
+        [void](Get-WhutAccountStatus `
+            -Context $resolved.Session `
+            -PortalUri $resolved.Portal `
+            -ApiBasePath $resolved.ApiBasePath `
+            -CsrfToken $resolved.CsrfToken)
+
+        $fingerprint = Get-CurrentNetworkFingerprint -UserIpHint $resolved.UserIpHint
+        if ($null -eq $fingerprint) {
+            Throw-Whut 50 'Could not identify one unambiguous physical network.'
+        }
+
+        $entry = Add-TrustedNetworkToConfig `
+            -Config $config `
+            -Fingerprint $fingerprint `
+            -RequestedLabel $RequestedLabel
+
+        if ($Script:JsonMode) {
+            Write-ResultJson ([pscustomobject]@{
+                state = 'TrustedNetworkAdded'
+                network = $entry
+            })
+        }
+        else {
+            Write-Host "[INFO]  Trusted current WHUT network: $($entry.label) [$($entry.id)]"
+        }
+        return 0
+    }
+    finally {
+        if ($null -ne $resolved) {
+            Close-HttpContext $resolved.Session
+        }
+    }
+}
+
 function Invoke-StatusCommand {
     if (Test-Internet) {
         Write-Log INFO 'ONLINE: direct Internet probe succeeded.'
+        if ($Script:JsonMode) {
+            Write-ResultJson ([pscustomobject]@{
+                state = 'Online'
+                exitCode = 0
+            })
+        }
         return 0
     }
 
     $resolved = $null
     try {
         $resolved = Resolve-PortalSession
-        if ($null -eq $resolved) { Write-Log INFO 'InternetOnline'; return 0 }
+        if ($null -eq $resolved) {
+            if ($Script:JsonMode) {
+                Write-ResultJson ([pscustomobject]@{ state = 'Online'; exitCode = 0 })
+            }
+            return 0
+        }
+
         $status = Get-WhutAccountStatus `
             -Context $resolved.Session `
             -PortalUri $resolved.Portal `
             -ApiBasePath $resolved.ApiBasePath `
             -CsrfToken $resolved.CsrfToken
 
-        if ([int](Get-ObjectProperty -Object $status -Name 'code') -eq $Script:WhutProtocol.OnlineCode) {
+        $code = [int](Get-ObjectProperty -Object $status -Name 'code')
+        $config = $null
+        $trusted = $false
+        if (Test-Path -LiteralPath $Script:ConfigPath) {
+            $config = Read-Config
+            $trusted = Test-TrustedLocalNetwork -Config $config -UserIpHint $resolved.UserIpHint
+        }
+
+        if ($Script:JsonMode) {
+            Write-ResultJson ([pscustomobject]@{
+                state = if ($code -eq $Script:WhutProtocol.OnlineCode) {
+                    'WhutAccountOnlineButInternetUnavailable'
+                } else {
+                    'AuthenticationRequired'
+                }
+                exitCode = if ($code -eq $Script:WhutProtocol.OnlineCode) { 40 } else { 10 }
+                portalVerified = $true
+                networkTrusted = [bool]$trusted
+                nasIdPresent = -not [string]::IsNullOrWhiteSpace([string]$resolved.NasId)
+                apiBase = $resolved.ApiBasePath
+            })
+        }
+
+        if ($code -eq $Script:WhutProtocol.OnlineCode) {
             Write-Log WARN 'WHUT account reports ONLINE, but the direct Internet probe failed.'
             return 40
         }
@@ -1267,18 +1703,28 @@ function Invoke-StatusCommand {
 
 function Invoke-LoginCommand {
     param(
-        [switch]$Automatic
+        [switch]$Automatic,
+        [switch]$PromptForTrust
     )
 
     if (Test-Internet) {
         Write-Log INFO 'ONLINE: no authentication needed.'
+        if ($Script:JsonMode) {
+            Write-ResultJson ([pscustomobject]@{ state = 'Online'; exitCode = 0 })
+        }
         return 0
     }
 
     $resolved = $null
     try {
         $resolved = Resolve-PortalSession
-        if ($null -eq $resolved) { Write-Log INFO 'InternetOnline'; return 0 }
+        if ($null -eq $resolved) {
+            if ($Script:JsonMode) {
+                Write-ResultJson ([pscustomobject]@{ state = 'Online'; exitCode = 0 })
+            }
+            return 0
+        }
+
         Write-Log INFO 'Trusted WHUT portal discovered.'
 
         $status = Get-WhutAccountStatus `
@@ -1290,14 +1736,75 @@ function Invoke-LoginCommand {
         if ([int](Get-ObjectProperty -Object $status -Name 'code') -eq $Script:WhutProtocol.OnlineCode) {
             if (Test-Internet) {
                 Write-Log INFO 'ONLINE: account and Internet probes both succeeded.'
+                if ($Script:JsonMode) {
+                    Write-ResultJson ([pscustomobject]@{ state = 'Online'; exitCode = 0 })
+                }
                 return 0
             }
 
             Write-Log WARN 'Account is authenticated, but Internet connectivity is unavailable.'
+            if ($Script:JsonMode) {
+                Write-ResultJson ([pscustomobject]@{
+                    state = 'WhutAccountOnlineButInternetUnavailable'
+                    exitCode = 40
+                })
+            }
             return 40
         }
 
+        if ([string]::IsNullOrWhiteSpace([string]$resolved.NasId)) {
+            Throw-Whut 11 'A current WHUT session nasId is required before authentication or registration.'
+        }
         $config = Read-Config
+        $current = Get-CurrentNetworkFingerprint -UserIpHint $resolved.UserIpHint
+        if ($null -eq $current) {
+            Throw-Whut 12 'Current physical network could not be identified safely.'
+        }
+
+        $match = Find-TrustedNetworkMatch -Config $config -Current $current -Automatic:$Automatic
+
+        if ($null -eq $match) {
+            if ($Script:JsonMode) {
+                Write-ResultJson ([pscustomobject]@{
+                    state = 'NewWhutNetwork'
+                    exitCode = 14
+                    portalVerified = $true
+                    networkTrusted = $false
+                    interface = $current.interfaceAlias
+                    ipv4Prefix = $current.ipv4Prefix
+                })
+                return 14
+            }
+
+            if ($Automatic -or -not $PromptForTrust) {
+                Throw-Whut 14 'New WHUT physical network detected; explicit trust is required before credentials can be sent.'
+            }
+
+            Write-Host ''
+            Write-Host 'New WHUT network detected.' -ForegroundColor Yellow
+            Write-Host "  Interface: $($current.interfaceAlias)"
+            Write-Host "  Prefix:    $($current.ipv4Prefix)"
+            Write-Host '  Portal:    verified'
+            Write-Host ''
+
+            $approved = $Yes
+            if (-not $approved) {
+                $answer = Read-Host 'Trust this network and connect? [y/N]'
+                $approved = $answer -match '^(?i:y|yes)$'
+            }
+
+            if (-not $approved) {
+                Throw-Whut 14 'Current WHUT network was not trusted; credentials were not sent.'
+            }
+
+            $entry = Add-TrustedNetworkToConfig `
+                -Config $config `
+                -Fingerprint $current `
+                -RequestedLabel $Label
+            Write-Log INFO "Trusted new WHUT network '$($entry.label)' [$($entry.id)]."
+            $config = Read-Config
+        }
+
         [void](Invoke-WhutLogin `
             -Context $resolved.Session `
             -PortalUri $resolved.Portal `
@@ -1325,6 +1832,13 @@ function Invoke-LoginCommand {
         }
 
         Write-Log INFO 'Authentication successful; Internet connectivity verified.'
+        if ($Script:JsonMode) {
+            Write-ResultJson ([pscustomobject]@{
+                state = 'Online'
+                exitCode = 0
+                authenticated = $true
+            })
+        }
         return 0
     }
     finally {
@@ -1334,34 +1848,97 @@ function Invoke-LoginCommand {
     }
 }
 
+function Invoke-RunCommand {
+    # Smart default: online -> exit; known WHUT -> connect; new verified WHUT ->
+    # one explicit Trust & Connect prompt.
+    return Invoke-LoginCommand -PromptForTrust
+}
+
+function Invoke-AutoCommand {
+    $mutex = Enter-AutoMutex
+    if ($null -eq $mutex) {
+        Write-Log INFO 'auto=skipped reason=already-running'
+        if ($Script:JsonMode) { Write-ResultJson ([pscustomobject]@{state='Skipped';reason='already-running';exitCode=0}) }
+        return 0
+    }
+
+    try {
+        $remaining = Get-AutoCooldownRemaining
+        if ($remaining -gt 0) {
+            Write-Log INFO "auto=skipped reason=cooldown remaining=${remaining}s"
+            if ($Script:JsonMode) { Write-ResultJson ([pscustomobject]@{state='Skipped';reason='cooldown';exitCode=0}) }
+            return 0
+        }
+
+        try {
+            $code = Invoke-LoginCommand -Automatic
+            if ($code -eq 0) {
+                Register-AutoSuccess
+            }
+            else {
+                Register-AutoFailure
+            }
+            return $code
+        }
+        catch {
+            Register-AutoFailure
+            throw
+        }
+    }
+    finally {
+        try { $mutex.ReleaseMutex() } catch {}
+        $mutex.Dispose()
+    }
+}
+
 function Invoke-DiagnoseCommand {
-    Write-Host "WHUT-Net v$Script:Version diagnostics"
-    Write-Host ('-' * 52)
-    Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
-    Write-Host "Config:     $(if (Test-Path -LiteralPath $Script:ConfigPath) { 'present' } else { 'missing' })"
-    Write-Host "Credential: $(if (Test-Path -LiteralPath $Script:CredentialPath) { 'present (DPAPI)' } else { 'missing' })"
-    Write-Host "HTTP_PROXY: $(if ([string]::IsNullOrWhiteSpace($env:HTTP_PROXY)) { 'not set' } else { 'set (ignored by WHUT-Net)' })"
-    Write-Host "HTTPS_PROXY:$(if ([string]::IsNullOrWhiteSpace($env:HTTPS_PROXY)) { ' not set' } else { ' set (ignored by WHUT-Net)' })"
+    if (-not $Script:JsonMode) {
+        Write-Host "WHUT-Net v$Script:Version diagnostics"
+        Write-Host ('-' * 52)
+        Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
+        Write-Host "Config:     $(if (Test-Path -LiteralPath $Script:ConfigPath) { 'present' } else { 'missing' })"
+        Write-Host "Credential: $(if (Test-Path -LiteralPath $Script:CredentialPath) { 'present (DPAPI)' } else { 'missing' })"
+        Write-Host "HTTP_PROXY: $(if ([string]::IsNullOrWhiteSpace($env:HTTP_PROXY)) { 'not set' } else { 'set (ignored by WHUT-Net)' })"
+        Write-Host "HTTPS_PROXY:$(if ([string]::IsNullOrWhiteSpace($env:HTTPS_PROXY)) { ' not set' } else { ' set (ignored by WHUT-Net)' })"
+        Write-Host "VPN/TUN:    $(if (Test-TunLikeAdapterPresent) { 'detected' } else { 'not detected' })"
+    }
 
     $internet = Test-Internet
-    Write-Host "Internet:   $(if ($internet) { 'OK' } else { 'failed / captive' })"
+    if (-not $Script:JsonMode) {
+        Write-Host "Internet:   $(if ($internet) { 'OK' } else { 'failed / captive' })"
+    }
 
     if ($internet) {
-        Write-Host 'Portal:     not required while Internet is reachable'
+        if ($Script:JsonMode) {
+            Write-ResultJson ([pscustomobject]@{
+                state = 'Online'
+                powershell = [string]$PSVersionTable.PSVersion
+                configPresent = Test-Path -LiteralPath $Script:ConfigPath
+                credentialPresent = Test-Path -LiteralPath $Script:CredentialPath
+                tunDetected = Test-TunLikeAdapterPresent
+                internet = $true
+            })
+        }
+        else {
+            Write-Host 'Portal:     not required while Internet is reachable'
+        }
         return 0
     }
 
     $resolved = $null
     try {
         $resolved = Resolve-PortalSession
-        if ($null -eq $resolved) { Write-Log INFO 'InternetOnline'; return 0 }
-        Write-Host "Portal:     trusted ($($resolved.Portal.Host))"
-        Write-Host "Bootstrap:  $(if ($resolved.Bootstrap) { 'recognized /api/r/<nasId>' } else { 'not required / not observed' })"
-        Write-Host "nasId:      $(if ($resolved.NasId) { 'present' } else { 'missing; login unavailable' })"
+        if ($null -eq $resolved) { return 0 }
+
         $fingerprint = Get-CurrentNetworkFingerprint -UserIpHint $resolved.UserIpHint
-        Write-Host "Physical:   $(if ($fingerprint) { 'OK (' + $fingerprint.interfaceAlias + ', ' + $fingerprint.ipv4Prefix + ')' } else { 'unresolved' })"
-        Write-Host "API base:   $($resolved.ApiBasePath)"
-        Write-Host 'CSRF:       OK (value intentionally hidden)'
+        $config = $null
+        $trustedMatch = $null
+        if (Test-Path -LiteralPath $Script:ConfigPath) {
+            $config = Read-Config
+            if ($null -ne $fingerprint) {
+                $trustedMatch = Find-TrustedNetworkMatch -Config $config -Current $fingerprint
+            }
+        }
 
         $status = Get-WhutAccountStatus `
             -Context $resolved.Session `
@@ -1369,8 +1946,38 @@ function Invoke-DiagnoseCommand {
             -ApiBasePath $resolved.ApiBasePath `
             -CsrfToken $resolved.CsrfToken
 
-        $statusCode = Get-ObjectProperty -Object $status -Name 'code'
-        Write-Host "Account:    code=$statusCode"
+        $statusCode = [int](Get-ObjectProperty -Object $status -Name 'code')
+
+        if ($Script:JsonMode) {
+            Write-ResultJson ([pscustomobject]@{
+                state = 'WhutPortal'
+                internet = $false
+                portalVerified = $true
+                portalHost = $resolved.Portal.Host
+                bootstrapRecognized = $null -ne $resolved.Bootstrap
+                nasIdPresent = -not [string]::IsNullOrWhiteSpace([string]$resolved.NasId)
+                physicalResolved = $null -ne $fingerprint
+                interface = if ($fingerprint) { $fingerprint.interfaceAlias } else { $null }
+                ipv4Prefix = if ($fingerprint) { $fingerprint.ipv4Prefix } else { $null }
+                networkTrusted = $null -ne $trustedMatch
+                trustedNetworkId = if ($trustedMatch) { Get-ObjectProperty $trustedMatch 'id' } else { $null }
+                apiBase = $resolved.ApiBasePath
+                csrf = 'OK'
+                accountCode = $statusCode
+                tunDetected = Test-TunLikeAdapterPresent
+            })
+        }
+        else {
+            Write-Host "Portal:     trusted ($($resolved.Portal.Host))"
+            Write-Host "Bootstrap:  $(if ($resolved.Bootstrap) { 'recognized /api/r/<nasId>' } else { 'not required / not observed' })"
+            Write-Host "nasId:      $(if ($resolved.NasId) { 'present' } else { 'missing; login unavailable' })"
+            Write-Host "Physical:   $(if ($fingerprint) { 'OK (' + $fingerprint.interfaceAlias + ', ' + $fingerprint.ipv4Prefix + ')' } else { 'unresolved' })"
+            Write-Host "Trusted:    $(if ($trustedMatch) { 'yes (' + [string](Get-ObjectProperty $trustedMatch 'label' '') + ')' } else { 'no - Trust & Connect required' })"
+            Write-Host "API base:   $($resolved.ApiBasePath)"
+            Write-Host 'CSRF:       OK (value intentionally hidden)'
+            Write-Host "Account:    code=$statusCode"
+        }
+
         return 0
     }
     finally {
@@ -1382,39 +1989,20 @@ function Invoke-DiagnoseCommand {
 
 function Invoke-SetupCommand {
     param(
-        [string]$RequestedUsername,
-        [switch]$AddNetwork
+        [string]$RequestedUsername
     )
 
     Ensure-DataDirectory
 
-    if ($AddNetwork) {
-        $config = Read-Config
-        if (-not (Test-Path -LiteralPath $Script:CredentialPath)) {
-            Throw-Whut 50 'Run setup with a password before adding a network.'
-        }
-        if ($RequestedUsername -and $RequestedUsername -cne [string]$config.username) {
-            Throw-Whut 50 'AddNetwork retains the existing account; do not specify a different username.'
-        }
-        $hint = Get-WhutNetworkHint
-        $current = Get-CurrentNetworkFingerprint -UserIpHint $hint
-        if ($null -eq $current) { Throw-Whut 12 'No unambiguous physical network to register. Connect to WHUT and retry.' }
-        $registered = @(Get-RegisteredNetworks $config)
-        foreach ($trusted in $registered) {
-            if (Test-NetworkFingerprintMatch $current $trusted -Automatic) {
-                Write-Log INFO 'This physical network fingerprint is already registered.'
-                return 0
-            }
-        }
-        Write-Config ([pscustomobject]@{
-            version = 3; username = [string]$config.username
-            trustedNetworks = @($registered) + @($current)
-        })
-        Write-Log INFO 'Additional physical network explicitly registered; existing account and credential retained.'
-        return 0
+    $existingConfig = $null
+    if (Test-Path -LiteralPath $Script:ConfigPath) {
+        try { $existingConfig = Read-Config } catch {}
     }
 
     $user = $RequestedUsername
+    if ([string]::IsNullOrWhiteSpace($user) -and $null -ne $existingConfig) {
+        $user = [string](Get-ObjectProperty $existingConfig 'username' '')
+    }
     if ([string]::IsNullOrWhiteSpace($user)) {
         $user = Read-Host 'WHUT campus network username'
     }
@@ -1430,54 +2018,90 @@ function Invoke-SetupCommand {
         Throw-Whut 50 'Password cannot be empty.'
     }
 
+    $trustedNetworks = @()
+    if ($null -ne $existingConfig) {
+        $trustedNetworks = @(Get-TrustedNetworks -Config $existingConfig)
+    }
+
+    $fingerprint = $null
+    $setupSession = $null
+
+    # setup may store credentials anywhere, but a network is added to the trust store
+    # only after the current WHUT bootstrap/API/status protocol has been verified.
     try {
-        $networkHint = Get-WhutNetworkHint
-        $trustedNetwork = Get-CurrentNetworkFingerprint -UserIpHint $networkHint
-        $config = [ordered]@{
+        if (-not (Test-Internet)) {
+            $setupSession = Resolve-PortalSession
+            if ($null -ne $setupSession -and -not [string]::IsNullOrWhiteSpace([string]$setupSession.NasId)) {
+                [void](Get-WhutAccountStatus `
+                    -Context $setupSession.Session `
+                    -PortalUri $setupSession.Portal `
+                    -ApiBasePath $setupSession.ApiBasePath `
+                    -CsrfToken $setupSession.CsrfToken)
+
+                $fingerprint = Get-CurrentNetworkFingerprint -UserIpHint $setupSession.UserIpHint
+            }
+        }
+    }
+    catch {
+        Write-Log WARN 'Current network was not added to trust during setup because WHUT protocol verification did not complete.'
+        $fingerprint = $null
+    }
+    finally {
+        if ($null -ne $setupSession) {
+            Close-HttpContext $setupSession.Session
+        }
+    }
+
+    try {
+        $baseConfig = [pscustomobject][ordered]@{
             version = 3
             username = $user
-            trustedNetworks = @($trustedNetwork | Where-Object { $null -ne $_ })
+            trustedNetworks = @($trustedNetworks)
         }
-        # ConvertFrom-SecureString without -Key uses DPAPI CurrentUser on Windows.
+
+        if ($null -ne $fingerprint) {
+            $entry = New-TrustedNetworkEntry -Fingerprint $fingerprint -RequestedLabel $Label
+            $merged = [Collections.Generic.List[object]]::new()
+            $updated = $false
+
+            foreach ($item in $trustedNetworks) {
+                if (Test-NetworkFingerprintMatch -Trusted $item -Current $fingerprint) {
+                    if ([string]::IsNullOrWhiteSpace($Label)) {
+                        $entry.label = [string](Get-ObjectProperty $item 'label' $entry.label)
+                    }
+                    $entry.id = [string](Get-ObjectProperty $item 'id' $entry.id)
+                    $merged.Add($entry)
+                    $updated = $true
+                }
+                else {
+                    $merged.Add($item)
+                }
+            }
+
+            if (-not $updated) { $merged.Add($entry) }
+            $baseConfig.trustedNetworks = @($merged.ToArray())
+        }
+
         $encrypted = $password | ConvertFrom-SecureString
         Set-Content -LiteralPath $Script:CredentialPath -Value $encrypted -Encoding utf8
-        Write-Config $config
+        Save-Config -Config $baseConfig
     }
-    finally { $password.Dispose(); $password = $null; $encrypted = $null }
+    finally {
+        $password.Dispose()
+        $password = $null
+        $encrypted = $null
+    }
+
     Write-Log INFO 'Configuration v3 saved. Password is protected with Windows DPAPI CurrentUser.'
-    if ($null -ne $trustedNetwork) {
-        Write-Log INFO 'Trusted physical network fingerprint saved (TUN/VPN routes ignored).'
+    if ($null -ne $fingerprint) {
+        Write-Log INFO 'Current protocol-verified WHUT physical network was added/updated without removing other trusted networks.'
     }
     else {
-        Write-Log WARN 'No unambiguous physical network fingerprint captured. Disconnect extra physical uplinks or run setup again on WHUT.'
+        Write-Log WARN 'Credentials were saved, but no new network was trusted. Reconnect while captive and use trust-current.'
     }
     Write-Log WARN 'The WHUT portal currently uses HTTP; the network transport itself is not end-to-end encrypted.'
+    if ($Script:JsonMode) { Write-ResultJson ([pscustomobject]@{state='Configured';exitCode=0;count=@($baseConfig.trustedNetworks).Count}) }
     return 0
-}
-
-function Resolve-PwshExecutable {
-    # App Execution Alias survives Store package upgrades and always returns a scalar.
-    $preferred = @(
-        (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\pwsh.exe'),
-        (Join-Path $PSHOME 'pwsh.exe')
-    )
-    foreach ($path in $preferred) {
-        if (Test-Path -LiteralPath $path -PathType Leaf) { return [string]$path }
-    }
-
-    $candidates = @(
-        Get-Command pwsh.exe -All -CommandType Application -ErrorAction SilentlyContinue |
-            ForEach-Object { [string]$_.Source } |
-            Where-Object {
-                $_ -match '^[A-Za-z]:\\' -and $_ -notmatch '["\x00-\x1f\x7f]' -and
-                [IO.Path]::GetFileName($_) -ieq 'pwsh.exe' -and
-                (Test-Path -LiteralPath $_ -PathType Leaf)
-            } | Sort-Object -Unique
-    )
-    if ($candidates.Count -ne 1) {
-        Throw-Whut 50 'No unique PowerShell executable found. Enable the Store pwsh alias or install PowerShell 7.'
-    }
-    return [string]$candidates[0]
 }
 
 function New-WhutTaskActionSpec {
@@ -1502,11 +2126,13 @@ function Install-WhutScheduledTask {
     }
 
     $config = Read-Config
-    if (-not (Test-TrustedLocalNetwork $config -Automatic)) {
-        Throw-Whut 50 'Install requires a registered physical network fingerprint. Run setup on WHUT.'
+    if (@(Get-TrustedNetworks -Config $config).Count -eq 0) {
+        Throw-Whut 50 'Install requires at least one trusted WHUT physical network. Use setup or trust-current first.'
     }
 
-    $actionSpec = New-WhutTaskActionSpec -ScriptPath $PSCommandPath
+    if ([string]::IsNullOrWhiteSpace($PSCommandPath) -or -not (Test-Path -LiteralPath $PSCommandPath)) {
+        Throw-Whut 50 'The script must be saved as a .ps1 file before installing the scheduled task.'
+    }
 
     $service = New-Object -ComObject 'Schedule.Service'
     $service.Connect()
@@ -1515,7 +2141,7 @@ function Install-WhutScheduledTask {
 
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 
-    $task.RegistrationInfo.Description = "WHUT-Net v$Script:Version auto-login on user logon and network connection."
+    $task.RegistrationInfo.Description = 'WHUT-Net v1.4.0 auto-login on user logon and network connection.'
     $task.Settings.Enabled = $true
     $task.Settings.Hidden = $true
     $task.Settings.StartWhenAvailable = $true
@@ -1545,9 +2171,10 @@ function Install-WhutScheduledTask {
 '@
 
     $action = $task.Actions.Create(0) # TASK_ACTION_EXEC
-    $action.Path = $actionSpec.Execute
-    $action.Arguments = $actionSpec.Arguments
-    $action.WorkingDirectory = $actionSpec.WorkingDirectory
+    $spec = New-WhutTaskActionSpec -ScriptPath $PSCommandPath
+    $action.Path = $spec.Execute
+    $action.Arguments = $spec.Arguments
+    $action.WorkingDirectory = $spec.WorkingDirectory
 
     # TASK_CREATE_OR_UPDATE = 6; no password is stored because this uses the current
     # interactive user's token.
@@ -1589,57 +2216,82 @@ function Show-Help {
     @"
 WHUT-Net v$Script:Version
 
-Usage:
-  .\whut-net.ps1 setup [-Username <student-id>]
-  .\whut-net.ps1 setup -AddNetwork
-  .\whut-net.ps1 status
-  .\whut-net.ps1 login
-  .\whut-net.ps1 auto
-  .\whut-net.ps1 diagnose
-  .\whut-net.ps1 install
-  .\whut-net.ps1 uninstall
-  .\whut-net.ps1 help
+Default:
+  .\whut-net.ps1
+      Smart mode: online -> exit; known WHUT -> connect; new verified WHUT ->
+      ask once whether to Trust & Connect.
 
 Commands:
-  setup       Save account/password and current network; -AddNetwork appends without changing the account.
-  status      Check Internet / WHUT authentication state. Never logs in.
-  login       Authenticate once if needed.
-  auto        Idempotent mode for Task Scheduler: exit immediately when online.
-  diagnose    Inspect portal discovery, nasId, API base, CSRF and account status.
-  install     Register one per-user scheduled task for logon + network-connect.
-  uninstall   Remove the task and all WHUT-Net local data.
-  help        Show this usage information.
+  setup [-Username <id>] [-Label <name>]
+      Save/update DPAPI credential and preserve existing trusted networks.
+      If the current captive WHUT network is verifiable, add/update it too.
+
+  setup -AddNetwork [-Label <name>]
+      Compatibility alias for trust-current; preserve the saved credential.
+
+  login
+      Authenticate once; ask for explicit trust on a new verified network.
+
+  status
+      Check Internet / WHUT authentication state. Never logs in.
+
+  auto
+      Non-interactive Task Scheduler mode. Known trusted WHUT networks only.
+
+  trust-current [-Label <name>]
+      Verify the current captive WHUT portal, then explicitly trust this physical network.
+
+  networks
+      List trusted physical WHUT networks.
+
+  remove-network -NetworkId <id>
+      Remove one trusted network fingerprint.
+
+  diagnose
+      Inspect portal, bootstrap, physical network, trust status, API and account state.
+
+  install
+      Register the per-user Task Scheduler task.
+
+  uninstall
+      Remove the task and all local WHUT-Net state.
+
+  help
+      Show this help.
+
+Options:
+  -Json
+      Machine-readable JSON output for status/diagnose/networks/trust operations and errors.
+
+  -Yes
+      Approve Trust & Connect without an interactive y/N prompt in smart mode.
 
 Exit codes:
    0  online / login successful
   10  WHUT portal reached, account offline
   11  PortalNotFound / session nasId missing
-  12  untrusted portal, network fingerprint or unsafe API path
+  12  untrusted portal/network or unsafe API path
   13  UnsupportedProtocol / ProtocolChanged
+  14  verified new WHUT network requires explicit trust
   20  authentication rejected
   21  additional verification / code check required
   22  CSRF acquisition failed
   30  PortalUnreachable / WHUT API unavailable
-  31  ProbeTimeout (discovery exhausted after one or more timeouts)
+  31  ProbeTimeout
   40  network or post-auth Internet failure
   50  local configuration / credential error
 
 Security:
   - Password at rest: Windows DPAPI CurrentUser.
+  - Credentials are released only after portal/protocol checks and a trusted physical network match.
+  - trustedNetworks[] stores multiple explicitly trusted physical WHUT environments.
+  - SSID/Profile names are labels only; they never auto-authorize a network.
+  - Unknown verified WHUT networks require one explicit Trust & Connect action.
   - Proxy variables are ignored for authentication traffic.
-  - Credentials are sent only to the hard-coded allowlisted WHUT portal host.
-  - Auto requires a matching registered physical IPv4 prefix, gateway and interface fingerprint.
-  - Config v3 stores trustedNetworks[]; v2 single fingerprints migrate automatically.
-  - setup -AddNetwork explicitly registers another WHUT network; profile names never add trust.
-  - Profile names are auxiliary; rerun setup to upgrade v1 without automatic migration.
-  - Discovery: NCSI redirect/content, NeverSSL, direct WHUT; /api/r/<nasId> bootstrap is recognized.
-  - Internet preflight never follows foreign redirects; unknown redirects are ignored and discovery continues.
-  - Protocol shapes are checked; commented-out config.js host_url test values are ignored.
-  - /api fallback requires an active CSRF fingerprint.
-  - Physical fingerprint selection ignores virtual/TUN routes; WHUT userip is used as a credential-free hint.
-  - DPAPI protects storage only; managed strings cannot be guaranteed immediately erased.
+  - TUN-like 198.18.0.0/15 interfaces are excluded from physical network fingerprinting.
+  - Task auto-login is single-instance and uses cooldown/backoff to avoid repeated requests.
   - CSRF token, cookies and password are never written to the log.
-  - The current WHUT portal is HTTP, so transport confidentiality depends on WHUT.
+  - The current WHUT portal is HTTP; DPAPI protects storage, not network transport.
 "@ | Write-Host
     return 0
 }
@@ -1650,17 +2302,26 @@ if ($MyInvocation.InvocationName -eq '.') { return }
 $exitCode = 0
 
 try {
-    if ($AddNetwork -and $Command -ne 'setup') { Throw-Whut 50 'AddNetwork is only valid with setup.' }
     switch ($Command) {
-        'help'     { $exitCode = Show-Help }
-        'setup'    { $exitCode = Invoke-SetupCommand -RequestedUsername $Username -AddNetwork:$AddNetwork }
-        'status'   { $exitCode = Invoke-StatusCommand }
-        'login'    { $exitCode = Invoke-LoginCommand }
-        'auto'     { $exitCode = Invoke-LoginCommand -Automatic }
-        'diagnose' { $exitCode = Invoke-DiagnoseCommand }
-        'install'  { $exitCode = Install-WhutScheduledTask }
-        'uninstall'{ $exitCode = Uninstall-Whut }
-        default    { $exitCode = Show-Help }
+        'run'            { $exitCode = Invoke-RunCommand }
+        'help'           { $exitCode = Show-Help }
+        'setup'          {
+            if ($AddNetwork) {
+                if ($Username) { Throw-Whut 50 'Use setup without -AddNetwork to change credentials.' }
+                $exitCode = Invoke-TrustCurrentCommand -RequestedLabel $Label
+            }
+            else { $exitCode = Invoke-SetupCommand -RequestedUsername $Username }
+        }
+        'status'         { $exitCode = Invoke-StatusCommand }
+        'login'          { $exitCode = Invoke-LoginCommand -PromptForTrust }
+        'auto'           { $exitCode = Invoke-AutoCommand }
+        'diagnose'       { $exitCode = Invoke-DiagnoseCommand }
+        'trust-current'  { $exitCode = Invoke-TrustCurrentCommand -RequestedLabel $Label }
+        'networks'       { $exitCode = Invoke-NetworksCommand }
+        'remove-network' { $exitCode = Invoke-RemoveNetworkCommand -Id $NetworkId }
+        'install'        { $exitCode = Install-WhutScheduledTask }
+        'uninstall'      { $exitCode = Uninstall-Whut }
+        default          { $exitCode = Invoke-RunCommand }
     }
 }
 catch {
@@ -1676,13 +2337,28 @@ catch {
         $exitCode = 40
     }
 
-    # Only deliberate WHUT errors contain messages safe for persistent logging.
-    # Unexpected exceptions may include request URLs or other session details.
-    if ($null -ne $_.Exception.Data['ExitCode']) {
-        Write-Log ERROR $_.Exception.Message
+    if ($Script:JsonMode) {
+        $safeMessage = if ($null -ne $_.Exception.Data['ExitCode']) {
+            [string]$_.Exception.Message
+        }
+        else {
+            'Unexpected operation failure.'
+        }
+        Write-ResultJson ([pscustomobject]@{
+            state = 'Error'
+            exitCode = $exitCode
+            message = $safeMessage
+        })
     }
     else {
-        Write-Log ERROR 'Unexpected operation failure; no request or credential details were logged.'
+        # Only deliberate WHUT errors contain messages safe for persistent logging.
+        # Unexpected exceptions may include request URLs or other session details.
+        if ($null -ne $_.Exception.Data['ExitCode']) {
+            Write-Log ERROR $_.Exception.Message
+        }
+        else {
+            Write-Log ERROR 'Unexpected operation failure; no request or credential details were logged.'
+        }
     }
 }
 

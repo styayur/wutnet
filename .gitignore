@@ -21,3 +21,6 @@ local.properties
 *.keystore
 *.hprof
 captures/
+
+# Private maintainer field logs (may contain account/session data)
+devlog/

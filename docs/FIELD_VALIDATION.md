@@ -70,3 +70,17 @@ The additional `trustedNetworks[]` registration and automatic v2→v3 migration 
 ## Result
 
 **Windows v1.3.2 field-verified.** The release consolidates the verified Windows authentication and reconnect-automation fixes. Future portal or deployment changes may require updates.
+
+## v1.4.0 fixed — additional supplied field evidence (2026-10-11)
+
+The maintainer supplied private `devlog` captures. They are excluded from Git because they contain local account and session data. The following is a sanitized engineering summary, not a fresh test performed during publication:
+
+- PowerShell 7.6.6 parsed the v1.4 script. `diagnose` recognized `/api/r/59`, replayed bootstrap, selected physical WLAN with TUN present, obtained `/api` and CSRF, and reported account code 1.
+- A new physical environment did not match the old v2 fingerprint; diagnostics required explicit trust.
+- The initial v1.4 `networks` output disappeared because the dispatcher captured the table stream with the exit code. The supplied fixed script routes tables through `Out-Host` and JSON through stdout separately.
+- The fixed script displayed the retained WHUT-WLAN registration. Explicit `trust-current -Label "WHUT-DORM"` verified the WHUT protocol, migrated to v3, and added the second fingerprint.
+- `networks` then displayed both WHUT-WLAN and WHUT-DORM. Default invocation authenticated successfully and verified Internet recovery.
+
+The log does not show a later return to WHUT-WLAN or a new scheduler test on the final release file. The earlier v1.3.2 scheduler observation remains historical evidence. Android has no new device-side WHUT evidence.
+
+Publication retains the v1.4 behavior while restoring v1.3.2 regression protections: atomic config writes, automatic v2 migration on read, exact physical bootstrap-IP matching, raw redirect checks, malformed-bootstrap rejection and block-comment/case-sensitive config parsing. It also keeps `setup -AddNetwork` and adds IDs to existing v1.3.2 v3 registrations. These release-preparation edits are covered by offline tests; they are not claimed to have been re-run against the campus portal.

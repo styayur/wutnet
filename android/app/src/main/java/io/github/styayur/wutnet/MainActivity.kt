@@ -101,7 +101,8 @@ open class MainActivity : Activity() {
         binding.save.setOnClickListener { saveCredential() }
         binding.clear.setOnClickListener {
             try {
-                store.clear(); binding.password.text.clear(); binding.username.text.clear()
+                store.clear(); PhysicalNetworkTrust.clear(this)
+                binding.password.text.clear(); binding.username.text.clear()
                 binding.consent.isChecked = false
                 binding.accountStatus.setText(R.string.credential_cleared)
             } catch (_: Exception) { binding.accountStatus.setText(R.string.credential_error) }
@@ -188,7 +189,7 @@ open class MainActivity : Activity() {
         binding.progress.visibility = if (value) View.VISIBLE else View.GONE
         listOf(binding.login, binding.save, binding.clear, binding.diagnose).forEach { it.isEnabled = !value }
     }
-    private fun runAttempt(login: Boolean) {
+    private fun runAttempt(login: Boolean, approvedFingerprint: String? = null) {
         if (!foreground || busy) return
         handler.removeCallbacks(refresh)
         val wifi = try { NetworkAccess(manager).resolve(preferredNetwork, systemEntry, capabilitySignatures.keys.toList()) }
@@ -210,13 +211,23 @@ open class MainActivity : Activity() {
         val current = ++generation
         operation = executor.submit {
             try {
-                val authenticator = Authenticator(NetworkHttp(wifi, manager), Credentials { store.load() }) { snapshot ->
+                val authenticator = Authenticator(NetworkHttp(wifi, manager), Credentials { store.load() },
+                    PhysicalNetworkTrust(this, manager, wifi.network)) { snapshot ->
                     handler.post { if (foreground && current == generation) show(snapshot, wifi) }
                 }
-                val result = authenticator.run(login, portalHint, wifi.captive)
+                val result = authenticator.run(login, portalHint, wifi.captive, approvedFingerprint)
                 handler.post {
                     if (foreground && current == generation) {
                         show(result, wifi)
+                        if (login && result.state == State.NetworkTrustRequired && !systemEntry &&
+                            result.diagnostics.networkFingerprint != null) {
+                            AlertDialog.Builder(this).setTitle(R.string.trust_title)
+                                .setMessage(R.string.trust_message)
+                                .setNegativeButton(android.R.string.cancel, null)
+                                .setPositiveButton(R.string.trust_connect) { _, _ ->
+                                    runAttempt(true, result.diagnostics.networkFingerprint)
+                                }.show()
+                        }
                         if (result.state == State.Authenticated && captivePortal != null) {
                             try { captivePortal?.reportCaptivePortalDismissed() }
                             catch (_: RuntimeException) { binding.portalStatus.setText(R.string.captive_limited) }
@@ -248,6 +259,7 @@ open class MainActivity : Activity() {
             State.PortalUnavailable -> R.string.state_unavailable
             State.TransportError -> R.string.state_transport
             State.CredentialRequired -> R.string.credential_error
+            State.NetworkTrustRequired -> R.string.state_trust_required
         }
         binding.portalStatus.setText(string)
         if (snapshot.state == State.CredentialRequired) binding.settingsPanel.visibility = View.VISIBLE

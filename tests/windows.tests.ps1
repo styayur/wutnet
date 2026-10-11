@@ -37,6 +37,9 @@ function Network {
 function New-HttpContext { param($TimeoutSeconds) [pscustomobject]@{ Client = $null } }
 function Close-HttpContext { param($Context) }
 
+Test-Case 'versioned download equals canonical script' {
+    Assert-Equal (Get-FileHash (Join-Path $root 'whut-net.ps1')).Hash (Get-FileHash (Join-Path $root 'whut-net-v1.4.0-fixed.ps1')).Hash
+}
 Test-Case 'portal exact allowlist accepts known URI and rejects lookalikes' {
     Assert-True (Test-TrustedPortalUri $portal)
     Assert-True (Test-TrustedPortalUri ([Uri]'http://172.30.21.100/tpl/whut/login.html'))
@@ -174,7 +177,7 @@ Test-Case 'DHCP host and profile rename preserve strict network trust' {
 }
 Test-Case 'changed gateway/prefix/portal or absent physical route refuses auto' {
     function Get-CurrentNetworkFingerprint { Network }
-    foreach ($field in @('defaultGateway','ipv4Prefix','portalHost','interfaceType','interfaceAlias')) {
+    foreach ($field in @('defaultGateway','ipv4Prefix','portalHost','interfaceType')) {
         $trusted = Network; $trusted.$field = 'different'
         Assert-True (-not (Test-TrustedLocalNetwork ([pscustomobject]@{version=2;trustedNetwork=$trusted}) -Automatic))
     }
@@ -199,7 +202,7 @@ Test-Case 'v1 config reads without mutation; auto requires upgrade' {
         Assert-Equal $config.version 1
         Assert-Equal ([IO.File]::ReadAllText($tempFile)) $old
         function Get-CurrentNetworkFingerprint { Network }
-        Assert-True (Test-TrustedLocalNetwork $config)
+        Assert-True (-not (Test-TrustedLocalNetwork $config))
         Assert-True (-not (Test-TrustedLocalNetwork $config -Automatic))
     }
     finally { $Script:ConfigPath = $saved; Remove-Item -LiteralPath $tempFile }
@@ -234,6 +237,7 @@ Test-Case 'status fingerprint is required before credential release' {
     Assert-Code { Invoke-LoginCommand -Automatic } 13
 }
 Test-Case 'login command requires both account and Internet verification' {
+    function Get-CurrentNetworkFingerprint { Network }
     $script:internetCalls = 0
     $script:statusCalls = 0
     $script:postCalls = 0
@@ -521,7 +525,7 @@ Test-Case 'scheduled task action contains scalar Execute, quoted script, and wor
     Assert-True (($spec | ConvertTo-Json) -notmatch 'String\[\]')
 }
 Test-Case 'release version and bootstrap log redaction' {
-    Assert-Equal $Script:Version '1.3.2'
+    Assert-Equal $Script:Version '1.4.0'
     $logs = $script:messages -join "`n"
     foreach ($secret in @('10.82.155.225','10.91.175.52','synthetic-csrf','test-user','password=')) {
         Assert-True (-not $logs.Contains($secret)) 'Sensitive log value found'
@@ -570,24 +574,25 @@ Test-Case 'explicit AddNetwork appends once without requesting or changing crede
         $Script:DataDir = $directory
         $Script:ConfigPath = Join-Path $directory 'config.json'
         $Script:CredentialPath = Join-Path $directory 'credential.dat'
-        Write-Config ([pscustomobject]@{version=3;username='synthetic-account';trustedNetworks=@((Network))})
+        Save-Config ([pscustomobject]@{version=3;username='synthetic-account';trustedNetworks=@((Network))})
         Set-Content -LiteralPath $Script:CredentialPath -Value 'synthetic-encrypted-placeholder'
         $credentialHash = (Get-FileHash -LiteralPath $Script:CredentialPath).Hash
         function Read-Host { throw 'AddNetwork must not prompt for a password' }
         function Read-ProtectedPassword { throw 'AddNetwork must not decrypt a credential' }
-        function Get-WhutNetworkHint { '10.82.155.225' }
+        function Test-Internet { $false }
+        function Resolve-PortalSession { [pscustomobject]@{Session=$null;Portal=$portal;ApiBasePath='/api';CsrfToken='synthetic';NasId='59';UserIpHint='10.82.155.225'} }
+        function Get-WhutAccountStatus { [pscustomobject]@{code=1} }
         function Get-CurrentNetworkFingerprint {
             $n = Network; $n.ipv4Prefix = '10.82.0.0/15'; $n.defaultGateway = '10.82.0.1'; $n.interfaceAlias = 'WLAN'; $n
         }
-        Assert-Equal (Invoke-SetupCommand -AddNetwork) 0
+        Assert-Equal (Invoke-TrustCurrentCommand -RequestedLabel 'WHUT-WLAN') 0
         Assert-Equal @((Read-Config).trustedNetworks).Count 2
-        Assert-Equal (Invoke-SetupCommand -AddNetwork) 0
+        Assert-Equal (Invoke-TrustCurrentCommand -RequestedLabel 'WHUT-WLAN') 0
         Assert-Equal @((Read-Config).trustedNetworks).Count 2
         Assert-Equal (Read-Config).username 'synthetic-account'
         Assert-Equal (Get-FileHash -LiteralPath $Script:CredentialPath).Hash $credentialHash
-        Assert-Code { Invoke-SetupCommand -AddNetwork -RequestedUsername 'different-account' } 50
         function Get-CurrentNetworkFingerprint { $null }
-        Assert-Code { Invoke-SetupCommand -AddNetwork } 12
+        Assert-Code { Invoke-TrustCurrentCommand -RequestedLabel 'WHUT-WLAN' } 50
         Assert-Equal @((Read-Config).trustedNetworks).Count 2
     }
     finally {
@@ -596,6 +601,73 @@ Test-Case 'explicit AddNetwork appends once without requesting or changing crede
         $Script:DataDir,$Script:ConfigPath,$Script:CredentialPath = $savedPaths
     }
 }
+
+Test-Case 'auto refuses new network without prompt, enrollment or decrypt' {
+    function Test-Internet { $false }
+    function Resolve-PortalSession { [pscustomobject]@{Session=$null;Portal=$portal;ApiBasePath='/api';CsrfToken='synthetic';NasId='59';UserIpHint=$null} }
+    function Get-WhutAccountStatus { [pscustomobject]@{code=1} }
+    function Read-Config { [pscustomobject]@{version=3;username='synthetic';trustedNetworks=@()} }
+    function Get-CurrentNetworkFingerprint { Network }
+    function Read-Host { throw 'Unexpected prompt' }
+    function Read-ProtectedPassword { throw 'Unexpected credential read' }
+    function Add-TrustedNetworkToConfig { throw 'Unexpected enrollment' }
+    Assert-Code { Invoke-LoginCommand -Automatic } 14
+    function Read-Host { 'n' }
+    Assert-Code { Invoke-LoginCommand -PromptForTrust } 14
+}
+Test-Case 'trust-current rejects failed protocol before saving anything' {
+    function Test-Internet { $false }
+    function Read-Config { [pscustomobject]@{version=3;username='synthetic';trustedNetworks=@()} }
+    function Resolve-PortalSession { [pscustomobject]@{Session=$null;Portal=$portal;ApiBasePath='/api';CsrfToken='synthetic';NasId='59';UserIpHint=$null} }
+    function Get-WhutAccountStatus { Throw-Whut 13 'Synthetic invalid status' }
+    function Add-TrustedNetworkToConfig { throw 'Unexpected enrollment' }
+    Assert-Code { Invoke-TrustCurrentCommand } 13
+}
+Test-Case 'v1.3.2 v3 entries acquire IDs and removing last entry persists an empty list' {
+    $saved = $Script:ConfigPath
+    $tempFile = [IO.Path]::GetTempFileName()
+    try {
+        $Script:ConfigPath = $tempFile
+        [pscustomobject]@{version=3;username='synthetic';trustedNetworks=@((Network))} |
+            ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $tempFile
+        $config = Read-Config
+        Assert-True ($config.trustedNetworks[0].id -match '^[a-f0-9]{12}$')
+        Assert-Equal (Remove-TrustedNetworkFromConfig $config $config.trustedNetworks[0].id) 0
+        Assert-Equal @((Read-Config).trustedNetworks).Count 0
+    } finally { $Script:ConfigPath = $saved; Remove-Item -LiteralPath $tempFile }
+}
+Test-Case 'CLI networks table and JSON reach stdout with isolated local state' {
+    $savedLocal = $env:LOCALAPPDATA
+    $directory = Join-Path ([IO.Path]::GetTempPath()) ('wutnet-cli-' + [Guid]::NewGuid().ToString('N'))
+    $data = Join-Path $directory 'WHUT-Net'
+    [void][IO.Directory]::CreateDirectory($data)
+    try {
+        $env:LOCALAPPDATA = $directory
+        $path = Join-Path $data 'config.json'
+        [pscustomobject]@{version=2;username='synthetic';trustedNetwork=(Network)} |
+            ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $path
+        $output = & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $root 'whut-net.ps1') networks -Json
+        Assert-Equal $LASTEXITCODE 0
+        $value = ($output -join "`n") | ConvertFrom-Json
+        Assert-Equal $value.count 1
+        Assert-Equal $value.version 3
+        Assert-True (-not (($output -join '') -match 'synthetic|\[INFO\]'))
+        $table = & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $root 'whut-net.ps1') networks
+        Assert-Equal $LASTEXITCODE 0
+        Assert-True (($table -join '') -match 'WHUT-DORM 2')
+        $output = & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $root 'whut-net.ps1') remove-network -NetworkId $value.networks[0].id -Json
+        Assert-Equal $LASTEXITCODE 0
+        Assert-Equal (($output -join "`n" | ConvertFrom-Json).remaining) 0
+        $output = & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $root 'whut-net.ps1') setup -AddNetwork -Username 'different' -Json
+        Assert-Equal $LASTEXITCODE 50
+    } finally {
+        $env:LOCALAPPDATA = $savedLocal
+        Remove-Item -LiteralPath (Join-Path $data 'config.json'),(Join-Path $data 'whut-net.log') -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $data
+        Remove-Item -LiteralPath $directory
+    }
+}
+
 Write-Host "$script:passed passed; $script:failed failed"
 if ($script:failed) { exit 1 }
 exit 0

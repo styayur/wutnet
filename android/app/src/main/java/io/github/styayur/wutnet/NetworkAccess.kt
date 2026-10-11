@@ -58,7 +58,7 @@ class NetworkHttp(private val wifi: WifiNetwork, private val manager: Connectivi
             connection.connectTimeout = 5000; connection.readTimeout = 5000
             connection.useCaches = false
             connection.setRequestProperty("Accept-Encoding", "identity")
-            connection.setRequestProperty("User-Agent", "WUTNet/0.1 Android")
+            connection.setRequestProperty("User-Agent", "WUTNet/1.4.0 Android")
             for ((name, value) in headers) connection.setRequestProperty(name, value)
             // Discovery and Internet probes neither receive nor send the local portal cookies.
             val portal = uri.host == Protocol.HOST

@@ -1,6 +1,6 @@
-# WHUT Portal protocol — Windows v1.3.2
+# WHUT Portal protocol — v1.4.0
 
-This records the current field-verified Windows flow, not an official WHUT specification. The [field record](FIELD_VALIDATION.md) identifies the observed environments and separates them from offline regression coverage. Android implementation is unchanged; see the platform notes below.
+This records the current field-verified Windows flow, not an official WHUT specification. The [field record](FIELD_VALIDATION.md) identifies the observed environments and separates them from offline regression coverage. See the platform notes below for Android differences.
 
 ## Discovery and bootstrap
 
@@ -32,11 +32,11 @@ Direct page reachability without `nasId` permits diagnostics/status but cannot a
 
 The bootstrap `userip` is a credential-free hint, not authentication. Select only active `Get-NetAdapter -Physical` candidates with usable IPv4/gateway data. Reject APIPA and `198.18.0.0/15`; virtual route ownership does not determine the fingerprint. A supplied hint must match one physical address exactly. Without a hint, select an unambiguous physical candidate using the existing private-address/route-metric preference.
 
-Config v3 stores `trustedNetworks[]`; each entry contains profile name (auxiliary), interface alias/type, recorded IPv4 address, actual CIDR prefix, default gateway and portal host. `setup -AddNetwork` is the explicit enrollment operation and preserves the existing account/password. Same-fingerprint registrations are deduplicated. Ordinary setup replaces the registrations with the current network.
+Config v3 stores `trustedNetworks[]`; each entry contains profile name (auxiliary), interface alias/type, stable ID/label and last-seen metadata, actual CIDR prefix, default gateway and portal host. `trust-current` (also `setup -AddNetwork`) is the explicit enrollment operation after protocol verification and preserves the existing account/password. Same-fingerprint registrations are deduplicated. Ordinary setup preserves all registrations and adds the current network only after successful verification.
 
-Reading v2 wraps its existing single fingerprint in the v3 list and atomically replaces only the config file. It does not decrypt or rewrite `credential.dat`. Version 1 remains readable; its profile names cannot authorize auto-login.
+Reading v2 wraps its existing single fingerprint in the v3 list and atomically replaces only the config file. It does not decrypt or rewrite `credential.dat`. Version 1 remains readable; its profile names cannot authorize any credential release. Existing v1.3.2 v3 entries receive stable IDs/labels without changing their trust fields.
 
-Immediately before decryption, auto must match **one complete entry** by prefix, gateway, host and interface alias/type. Fields from different entries are never combined. Manual login may tolerate an alias/type change, but v3/v2 still require prefix/gateway/host consistency. Profile/SSID names never enroll networks or suffice for trust. DHCP host addresses may change within the registered prefix.
+Immediately before decryption, auto must match **one complete entry** by prefix, gateway, host and interface type. Fields from different entries are never combined. Manual login uses the same fields; interface aliases are presentation only. Profile/SSID names never enroll networks or suffice for trust. DHCP host addresses may change within the registered prefix.
 
 ## API base and protocol fingerprint
 
@@ -76,7 +76,7 @@ After login code 0, wait once for 750 ms, require status code 0 and require an I
 
 ## Android platform notes
 
-The existing Android source and CI are unchanged by Windows v1.3.2. Android uses a selected Wi-Fi Network, network-bound requests, Keystore-backed storage and its existing strict portal/config validation. Its system sign-in entry is permission-protected; installing the app does not force OEMs to select it. Windows bootstrap and multi-network changes are not implicitly ported to Android. See [Android usage](ANDROID.md) and [device testing](android-testing.md).
+Android v1.4.0 now replays dynamic bootstrap and cookies, skips failed/foreign discovery probes, ignores config comments and supports explicitly registered physical Wi-Fi networks. The user confirms a new network after portal/config/CSRF/status validation; automatic system entry cannot enroll. Requests stay bound to the selected Wi-Fi, with no cellular retry. Android requires a valid config.js rather than the Windows `/api` fallback and does not use direct-page discovery. Its system entry remains permission-protected; installing the app does not force OEMs to select it. JVM tests and Lint/build are verified; real-device WHUT validation is pending. See [Android usage](ANDROID.md) and [device testing](android-testing.md).
 
 ## Security limits
 

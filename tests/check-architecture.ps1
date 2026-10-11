@@ -33,8 +33,12 @@ foreach ($file in $scripts) {
 }
 $scriptText = Get-Content (Join-Path $root 'whut-net.ps1') -Raw
 $version = [regex]::Match($scriptText, '\$Script:Version = ''([^'']+)''').Groups[1].Value
-if ($version -ne '1.3.2' -or -not $readme.Contains("v$version") -or $evidence.source_version -ne "v$version") {
+if ($version -ne '1.4.0' -or -not $readme.Contains("v$version") -or $evidence.source_version -ne "v$version") {
     throw 'Release version/documentation mismatch.'
+}
+if ((Get-FileHash (Join-Path $root 'whut-net.ps1')).Hash -ne
+    (Get-FileHash (Join-Path $root 'whut-net-v1.4.0-fixed.ps1')).Hash) {
+    throw 'Canonical and versioned release scripts differ.'
 }
 $helpText = & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $root 'whut-net.ps1') help
 if ($LASTEXITCODE -ne 0 -or ($helpText -join "`n") -notmatch [regex]::Escape("WHUT-Net v$version")) {

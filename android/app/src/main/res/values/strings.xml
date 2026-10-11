@@ -1,6 +1,10 @@
 <resources>
     <string name="app_name">WUTNet</string>
-    <string name="subtitle">WHUT network · Android v0.1 alpha</string>
+    <string name="subtitle">WHUT network · Android v1.4.0 experimental</string>
+    <string name="trust_title">Register this WHUT network?</string>
+    <string name="trust_message">The WHUT portal, CSRF and account protocol checks passed. Confirm that you are connected to a trusted WHUT physical Wi-Fi network. Registration keeps your other networks; network names alone never grant trust.</string>
+    <string name="trust_connect">Trust and connect</string>
+    <string name="state_trust_required">New physical network — open WUTNet directly and tap Login to register it.</string>
     <string name="network_label">Network status</string>
     <string name="portal_label">Portal status</string>
     <string name="account_label">Account</string>

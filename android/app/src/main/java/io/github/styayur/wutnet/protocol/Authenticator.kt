@@ -11,15 +11,23 @@ class Credential(val username: String, val password: CharArray) {
     override fun toString(): String = "Credential(redacted)"
 }
 fun interface Credentials { fun load(): Credential }
+interface NetworkTrust {
+    fun fingerprint(): String?
+    fun matchesUserIp(userIp: String?): Boolean
+    fun contains(fingerprint: String): Boolean
+    fun register(fingerprint: String)
+}
 data class Diagnostics(
     val portalDetected: Boolean = false, val portalTrusted: Boolean = false,
     val nasId: String? = null, val apiBase: String? = null, val csrf: String = "NOT CHECKED",
-    val account: String = "NOT CHECKED", val internet: String = "NOT CHECKED"
+    val account: String = "NOT CHECKED", val internet: String = "NOT CHECKED",
+    val networkFingerprint: String? = null
 )
 data class Snapshot(val state: State, val diagnostics: Diagnostics = Diagnostics())
 
 /** One finite attempt; pure Kotlin so ordering and credential boundaries are JVM-testable. */
 class Authenticator(private val transport: Transport, private val credentials: Credentials,
+                    private val trust: NetworkTrust,
                     private val emit: (Snapshot) -> Unit = {}) {
     private var diagnostics = Diagnostics()
     private fun state(state: State): Snapshot = Snapshot(state, diagnostics).also(emit)
@@ -62,7 +70,29 @@ class Authenticator(private val transport: Transport, private val credentials: C
         diagnostics = diagnostics.copy(internet = if (identity) "OK (Wi-Fi NCSI identity probe)" else "FAILED")
         return identity
     }
-    fun run(login: Boolean, portalHint: String? = null, captive: Boolean = false): Snapshot {
+    private fun redirect(base: URI, location: String): URI {
+        val hint = Protocol.uri(location)
+        if (hint.rawPath.split('/').any { it == "." || it == ".." })
+            throw ProtocolFailure(State.UntrustedPortal)
+        return base.resolve(hint)
+    }
+    private fun discover(): URI {
+        var foreign = false
+        for (probe in Protocol.discoveryProbes) {
+            val response = try { request(probe) } catch (e: Exception) {
+                if (e is InterruptedException) throw e
+                continue
+            }
+            if (response.status !in 300..399 || response.location == null) continue
+            val target = redirect(probe, response.location)
+            if (Protocol.trustedPortal(target) || Protocol.trustedBootstrap(target)) return target
+            if (target.host == Protocol.HOST) throw ProtocolFailure(State.PortalUnavailable)
+            foreign = true // Never follow a foreign redirect or send it cookies.
+        }
+        throw ProtocolFailure(if (foreign) State.UntrustedPortal else State.PortalUnavailable)
+    }
+    fun run(login: Boolean, portalHint: String? = null, captive: Boolean = false,
+            approvedFingerprint: String? = null): Snapshot {
         try {
             checkCancelled()
             if (!captive && transport.validated()) {
@@ -71,15 +101,23 @@ class Authenticator(private val transport: Transport, private val credentials: C
             }
             state(if (captive) State.CaptivePortal else State.WhutOffline)
             if (!captive && internet()) return state(State.Online)
-            val portal = if (!portalHint.isNullOrBlank()) {
+            val entry = if (!portalHint.isNullOrBlank()) {
                 // System-supplied URLs are hints, never a trust exemption.
-                Protocol.requirePortal(Protocol.uri(portalHint))
-            } else {
-                val discovery = request(Protocol.probe)
-                if (discovery.status !in 300..399 || discovery.location == null)
-                    throw ProtocolFailure(State.PortalUnavailable)
-                Protocol.requirePortal(Protocol.probe.resolve(Protocol.uri(discovery.location)))
-            }
+                Protocol.uri(portalHint).also {
+                    if (!Protocol.trustedPortal(it) && !Protocol.trustedBootstrap(it))
+                        throw ProtocolFailure(State.UntrustedPortal)
+                }
+            } else discover()
+            val portal = if (Protocol.trustedBootstrap(entry)) {
+                val canonical = Protocol.bootstrapPortal(entry)
+                val response = request(entry) // Same Transport and cookie jar for the whole session.
+                if (response.status in 300..399) {
+                    val next = redirect(entry, response.location ?: throw ProtocolFailure(State.PortalUnavailable))
+                    if (!Protocol.trustedPortal(next) && !Protocol.trustedBootstrap(next))
+                        throw ProtocolFailure(State.UntrustedPortal)
+                } else if (response.status !in 200..299) throw ProtocolFailure(State.PortalUnavailable)
+                canonical
+            } else Protocol.requirePortal(entry)
             diagnostics = diagnostics.copy(portalDetected = true, portalTrusted = true)
             val nasId = Protocol.nasId(portal)
             diagnostics = diagnostics.copy(nasId = nasId)
@@ -105,11 +143,23 @@ class Authenticator(private val transport: Transport, private val credentials: C
             if (!login) return state(State.WhutOffline)
             // Fingerprints (portal + config + CSRF + status) all passed before decryption.
             checkCancelled()
+            val fingerprint = trust.fingerprint() ?: throw ProtocolFailure(State.NoNetwork)
+            val userIp = Protocol.query(portal, "userip") ?: Protocol.query(portal, "ip")
+            if (!trust.matchesUserIp(userIp)) throw ProtocolFailure(State.UntrustedPortal)
+            diagnostics = diagnostics.copy(networkFingerprint = fingerprint)
+            if (!trust.contains(fingerprint)) {
+                if (approvedFingerprint != fingerprint) return state(State.NetworkTrustRequired)
+                trust.register(fingerprint)
+            }
+            if (trust.fingerprint() != fingerprint || !trust.contains(fingerprint))
+                throw ProtocolFailure(State.NetworkTrustRequired)
             val credential = credentials.load()
             state(State.Authenticating)
             val body = try { Protocol.loginBody(credential.username, credential.password, nasId) }
                 finally { credential.password.fill('\u0000') }
             val loginResponse = try {
+                if (trust.fingerprint() != fingerprint || !trust.matchesUserIp(userIp))
+                    throw ProtocolFailure(State.NoNetwork)
                 ok(Protocol.endpoint(apiBase, "/account/login"),
                     headers + ("Origin" to "http://${Protocol.HOST}"), body, State.AuthFailed)
             } finally { body.fill(0) }

@@ -1,18 +1,18 @@
 # WUTNet
 
-**v1.3.2 · Field-verified Windows release**
+**v1.4.0 · Field-verified Windows release**
 
 A minimal PowerShell 7 authenticator and auto-login utility for the Wuhan University of Technology captive portal.
 
 Windows-native · single-file · zero third-party runtime dependencies · cross-campus dynamic discovery · TUN/VPN-aware · no resident daemon
 
-[Download v1.3.2](https://github.com/styayur/wutnet/releases/tag/v1.3.2) · [Release notes](docs/releases/v1.3.2.md) · [Field validation](docs/FIELD_VALIDATION.md)
+[Download v1.4.0](https://github.com/styayur/wutnet/releases/tag/v1.4.0) · [Release notes](docs/releases/v1.4.0.md) · [Field validation](docs/FIELD_VALIDATION.md)
 
 ## What it does
 
 WUTNet discovers the current WHUT login session, authenticates when needed, and verifies both account status and Internet recovery. It protects the saved password with Windows DPAPI and can run on logon or network reconnect through Task Scheduler.
 
-The Windows client is one file: `whut-net.ps1`. The existing [experimental Android client](docs/ANDROID.md) is maintained separately and is unchanged by this release.
+The Windows client is one file: `whut-net.ps1`. The [experimental Android client](docs/ANDROID.md) is updated alongside this release.
 
 ## Why WUTNet exists
 
@@ -28,7 +28,7 @@ Windows PowerShell 5.1 (`powershell.exe`) is not supported. No Python, browser e
 
 ## Quick Start
 
-Download `whut-net.ps1` and `SHA256SUMS.txt` from the release. Compare the script hash with `Get-FileHash .\whut-net.ps1 -Algorithm SHA256`. Keep the script in a stable location before installing automation.
+Download `whut-net-v1.4.0-fixed.ps1` (or the identical `whut-net.ps1`) and `SHA256SUMS.txt` from the release. The examples below use the short filename; rename the downloaded script or substitute its full name. Compare the script hash with `Get-FileHash .\whut-net.ps1 -Algorithm SHA256`. Keep the script in a stable location before installing automation.
 
 Open PowerShell 7 while connected to WHUT. If Windows has marked the downloaded file, inspect it and run `Unblock-File .\whut-net.ps1`.
 
@@ -48,16 +48,23 @@ Enter the password at the secure prompt. After successful login:
 To trust another WHUT physical network, such as WHUT-DORM in addition to WHUT-WLAN, connect to that network and explicitly register it:
 
 ```powershell
-.\whut-net.ps1 setup -AddNetwork
+.\whut-net.ps1 trust-current -Label "WHUT-DORM"
+.\whut-net.ps1 networks
 ```
 
-`-AddNetwork` keeps the existing account, encrypted password and registrations. Registering the same fingerprint twice does not duplicate it. Ordinary `setup` saves a password and resets the trust list to the current network; use `-AddNetwork` to preserve previous networks.
+`trust-current` verifies the current captive WHUT session (portal/bootstrap, config, CSRF and status) before registration. It keeps the account, encrypted password and existing networks; repeats update the entry without duplication. `setup -AddNetwork` remains a compatibility alias. Ordinary `setup` now preserves registrations too; if verification is unavailable, it saves credentials without trusting a new network.
+
+Run `.\whut-net.ps1` without arguments for the same checks and one explicit **Trust & Connect** prompt on a new verified network. `auto` never prompts or enrolls. `-Json` suppresses informational logs on stdout and emits a JSON result for status, login, diagnose and network-management commands.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `setup [-Username <student-id>]` | Save account/password and register the current physical network |
+| `setup [-Username <student-id>]` | Save credentials, preserve registrations, and add the current network only after protocol verification |
+| `run` (default) | Connect when needed; ask before trusting a new verified network |
+| `trust-current [-Label <name>]` | Verify and explicitly register the current physical network |
+| `networks [-Json]` | List registered fingerprints, labels and IDs |
+| `remove-network -NetworkId <id>` | Remove one registration |
 | `setup -AddNetwork` | Explicitly append a physical network without changing the account/password |
 | `status` | Check Internet and account state; never log in |
 | `login` | Authenticate once if needed, then verify account and Internet |
@@ -104,7 +111,7 @@ Authentication success means **login response + account status verification + In
 
 - **Storage:** DPAPI `CurrentUser` protects the password in `%LOCALAPPDATA%\WHUT-Net\credential.dat`. Account and fingerprints are in `config.json`; bounded logs are in `whut-net.log`. These files are ignored by Git.
 - **Network registrations:** config v3 stores `trustedNetworks[]`. Existing v2 `trustedNetwork` is automatically migrated on read without changing the account or credential. Legacy v1 remains readable but needs explicit setup before automatic login.
-- **Trust checks:** auto must match one registered IPv4 prefix, gateway, portal host and interface identity. Profile/SSID names never enroll networks or grant trust. DHCP host-address and profile suffix changes are tolerated. Manual login permits interface alias/type changes while retaining prefix/gateway/host checks.
+- **Trust checks:** auto must match one complete registered IPv4 prefix, gateway, portal host and interface type. Profile/SSID names never enroll networks or grant trust. DHCP host-address and profile suffix changes are tolerated. Interface alias changes are tolerated; interface type changes require a separate registration in both manual and automatic mode.
 - **Physical selection:** enumerate active physical adapters, exclude APIPA and `198.18.0.0/15`, and match the bootstrap `userip` exactly when supplied. Otherwise use unambiguous physical candidates/metrics. TUN route ownership alone does not select the fingerprint.
 - **Destination:** exact WHUT host/path/port checks apply to bootstrap and login. API bases must be safe relative paths. HTTP proxy use and automatic redirects are disabled.
 - **Password lifetime:** decrypt only immediately before the dedicated POST. Clear owned BSTR, character and byte buffers on success/failure. No plaintext password string is deliberately constructed. PowerShell/.NET cannot guarantee immediate removal of every runtime/HTTP-stack copy.
@@ -124,7 +131,7 @@ WHUT currently uses **HTTP**. DPAPI protects the password **at rest only**. IP/p
 - ✓ Online `status` and idempotent `auto`
 - ✓ Task installation with the Store alias and scheduled auto-login after reconnect
 
-The [engineering record](docs/FIELD_VALIDATION.md) separates these field observations from offline regression tests. Multiple-network registration and v2→v3 migration added during release preparation are offline-tested; a fresh multi-registration campus-switch test is not claimed.
+The [engineering record](docs/FIELD_VALIDATION.md) separates these field observations from offline regression tests. The v1.4 development log also confirms listing the old v2 registration, explicitly adding WHUT-DORM while retaining WHUT-WLAN, listing both entries and successful default-mode authentication. A subsequent physical return to WHUT-WLAN is not recorded; matching either registration is covered by offline tests.
 
 ## Troubleshooting
 
@@ -133,7 +140,7 @@ The [engineering record](docs/FIELD_VALIDATION.md) separates these field observa
 | Empty reply from server | Confirm WHUT connectivity and discover a fresh campus session. The portal may be unreachable or the captured URL stale. Do not reuse an old `/api/r/<nasId>?...` URL. |
 | `ProtocolChanged` / exit 13 | WHUT frontend/API shape or redirect path may have changed. Run `diagnose`; do not bypass the allowlist. |
 | No physical fingerprint | Check WHUT connectivity, multiple physical uplinks and complete IPv4/gateway data. TUN route ownership is excluded from selection; an unmatched campus `userip` fails closed. |
-| Different campus/network refused | Connect there and explicitly run `setup -AddNetwork`. No network is trusted merely because its profile name looks familiar. |
+| Different campus/network refused | Connect there and explicitly run `trust-current -Label "WHUT-DORM"` (or `setup -AddNetwork`). No network is trusted merely because its profile name looks familiar. |
 | PowerShell not found / task install fails | Verify PowerShell 7 and its Store App Execution Alias at `%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe`. Multiple ambiguous fallback candidates are refused. |
 | HTTP warning | Expected: DPAPI protects storage, while WHUT's portal itself uses HTTP. |
 | Script execution blocked | Use PowerShell 7, inspect the downloaded script and unblock that file; no global policy change is required. |
@@ -147,6 +154,7 @@ The [engineering record](docs/FIELD_VALIDATION.md) separates these field observa
 | 11 | Portal not found or session `nasId` missing |
 | 12 | Untrusted network/destination or unsafe API path |
 | 13 | Unsupported or changed protocol |
+| 14 | New verified WHUT network requires explicit registration |
 | 20 | Authentication explicitly rejected |
 | 21 | Additional verification required |
 | 22 | CSRF/bootstrap request failed |
@@ -168,7 +176,11 @@ flowchart TD
   Status -->|yes| Verify[Verify Internet]
   Status -->|no| Trust[Match a registered physical fingerprint]
   Config[(Config: trustedNetworks)] --> Trust
-  Trust --> Decrypt[Late DPAPI decrypt]
+  Trust -->|registered| Decrypt[Late DPAPI decrypt]
+  Trust -->|new network| Approval{Explicit Trust & Connect?}
+  Approval -->|yes| Register[Save verified fingerprint]
+  Register --> Decrypt
+  Approval -->|no / auto| Refuse[Exit 14; no credential sent]
   Store[(DPAPI credential)] --> Decrypt
   Decrypt --> Login[Dedicated login POST; clear owned buffers]
   Login --> Check[Wait 750 ms; verify account status]
@@ -177,7 +189,13 @@ flowchart TD
 ```
 <!-- architecture:overview:end -->
 
-All Windows authentication logic stays in one PowerShell file. The 750 ms delay is a single verification delay, not a retry loop. See [protocol details](docs/protocol.md) and [architecture evidence](docs/architecture/README.md). Existing [Android notes](docs/ANDROID.md) describe the separate client.
+All Windows authentication logic stays in one PowerShell file. The 750 ms delay is a single verification delay, not a retry loop. See [protocol details](docs/protocol.md) and [architecture evidence](docs/architecture/README.md). [Android notes](docs/ANDROID.md) describe the updated v1.4.0 client.
+
+## Android v1.4.0 (experimental)
+
+The same release includes an installable **debug-signed APK**, `wutnet-android-v1.4.0-debug.apk`. Android now supports dynamic `/api/r/<nasId>` bootstrap replay, shared cookies, multiple discovery probes, comment-safe config parsing and multiple explicitly registered physical Wi-Fi networks. On first login to a new verified WHUT network, tap **Trust and connect**. System-triggered login only uses an existing registration. SSIDs are neither read nor trusted.
+
+The APK has passed JVM tests, Android Lint and a build; **real-device WHUT authentication remains unverified**. It uses a development signing key, not a production signing identity. If another build has a different signature, Android requires uninstalling it before this APK can be installed; that removes local credentials and registrations. See [Android setup and security](docs/ANDROID.md) and the [device checklist](docs/android-testing.md).
 
 ## Limitations
 
@@ -193,7 +211,7 @@ pwsh -NoLogo -NoProfile -File .\tests\check-secrets.ps1 -History
 pwsh -NoLogo -NoProfile -File .\tests\check-architecture.ps1
 ```
 
-Windows CI runs `Parser::ParseFile`, offline regression and the secret/local-state guard. Documentation checks are lightweight; optional Mermaid rendering remains a manual development check. Android CI and source are unchanged. The secret guard is intentionally small, not an exhaustive secret scanner.
+Windows CI runs `Parser::ParseFile`, offline regression and the secret/local-state guard. Documentation checks are lightweight; optional Mermaid rendering remains a manual development check. Android CI runs JVM tests, Lint and a debug APK build. The secret guard is intentionally small, not an exhaustive secret scanner.
 
 ## License
 
