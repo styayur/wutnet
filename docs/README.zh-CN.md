@@ -39,7 +39,7 @@ pwsh -NoProfile -File ./whut-net.ps1 help
 
 每次命令执行完退出，**没有 logout 子命令**。退出脚本、删除网络登记或卸载不会结束校园网服务端会话，请通过学校门户退出。
 
-可先在任务计划程序停用该任务，保留密码与配置。`uninstall` 尝试删除任务后，会删除本地配置、DPAPI 密码及日志；**任务删除失败也可能返回 0**，必须另行确认任务消失。没有自动备份或撤销，重新 `setup` 可重建配置，DPAPI 密文不能当作跨账号/机器的便携备份。详见[卸载与恢复限制](WINDOWS.md#stop-automation-remove-trust-or-uninstall)。
+可先在任务计划程序停用该任务，保留密码与配置。`uninstall` 尝试删除任务后，会删除本地配置、DPAPI 密码及日志；**已发布 v1.4.0 的任务删除失败也可能返回 0**。当前源码已修复为失败返回 1 并保留本地状态，仅成功删除或确认任务不存在后才删除状态；仍应另行确认任务消失。没有自动备份或撤销，重新 `setup` 可重建配置，DPAPI 密文不能当作跨账号/机器的便携备份。详见[卸载与恢复限制](WINDOWS.md#stop-automation-remove-trust-or-uninstall)。
 
 ## 已验证范围
 

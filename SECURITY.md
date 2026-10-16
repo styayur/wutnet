@@ -18,7 +18,7 @@ WHUT currently uses **HTTP**. DPAPI protects the password **at rest only**. IP/p
 
 ## Recovery limits
 
-`help` is offline. Diagnostics/status make requests, may write logs and may migrate old config; they do not submit a password. Network removal/uninstall has no automatic undo. The current uninstaller can return 0 after task-removal failure; read [removal and verification](docs/WINDOWS.md#stop-automation-remove-trust-or-uninstall) before use. Preserve private backups yourself where needed.
+`help` is offline. Diagnostics/status make requests, may write logs and may migrate old config; they do not submit a password. Network removal/uninstall has no automatic undo. The published v1.4.0 uninstaller can return 0 after task-removal failure. Current source instead returns 1 and retains state on such failure; read [removal and verification](docs/WINDOWS.md#stop-automation-remove-trust-or-uninstall) before use. Preserve private backups yourself where needed.
 
 ## Android
 

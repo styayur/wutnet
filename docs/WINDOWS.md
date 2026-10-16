@@ -33,7 +33,7 @@ Compare the complete SHA-256 for the exact filename before execution. Stop on mi
 | `auto` | Automatic mode; exit immediately if already online; otherwise require a registered fingerprint |
 | `diagnose` | Inspect discovery, bootstrap, physical fingerprint, API, CSRF and status without sending the password |
 | `install` | Register the per-user scheduled task |
-| `uninstall` | Attempt task removal, then delete local config, credential and logs; see the failure limitation below |
+| `uninstall` | Remove task, then delete local config, credential and logs; current source preserves state on task-removal failure |
 | `help` | Show usage and exit codes |
 
 
@@ -72,7 +72,7 @@ These are Windows Task Scheduler commands, not client subcommands. Confirm the t
 
 `remove-network -NetworkId '<listed-id>'` forgets one registration and prevents automatic authentication on it; it does not remove the account/password or log out. Use `networks -Json` to select the exact ID.
 
-**Uninstall is destructive and has a known failure-reporting limitation.** `uninstall` attempts to remove `WHUT-Net AutoLogin`, then recursively deletes `%LOCALAPPDATA%/WHUT-Net` (configuration, DPAPI credential, logs and auto state). Task Scheduler errors are caught and reported like an absent task; the function can delete state and return 0 even when the task was not removed. The current test suite does not validate this failure path. Do not rely on exit 0 as proof of removal.
+**Uninstall is destructive. Published v1.4.0 has a failure-reporting limitation.** `uninstall` attempts to remove `WHUT-Net AutoLogin`, then recursively deletes `%LOCALAPPDATA%/WHUT-Net` (configuration, DPAPI credential, logs and auto state). Task Scheduler errors are caught and reported like an absent task; the function can delete state and return 0 even when the task was not removed. Current source repairs this: an access/connection/removal failure returns 1 and retains local state; only successful deletion or the specific task-not-found error permits state deletion. Four offline synthetic regressions cover removal, absence, access denial and service connection failure. This repair is not in the published v1.4.0 assets; their exit 0 is not proof of removal.
 
 Before uninstall, verify/disable the matching task and preserve any local records you need in a private location. Do not point the state directory through a junction or share. Afterward verify in Task Scheduler that the task is gone; resolve permission/COM errors there if it remains. The script file itself remains and can be removed separately once no task points at it:
 
