@@ -1,218 +1,88 @@
 # WUTNet
 
-**v1.4.0 · Field-verified Windows release**
+A lightweight Windows PowerShell tool for Wuhan University of Technology campus-network authentication: configure once, verify the network, log in when needed, then exit.
 
-A minimal PowerShell 7 authenticator and auto-login utility for the Wuhan University of Technology captive portal.
+**PowerShell-native · CLI-first · Read-only-first · Reversible operations · Minimal dependencies**
 
-Windows-native · single-file · zero third-party runtime dependencies · cross-campus dynamic discovery · TUN/VPN-aware · no resident daemon
+[Windows v1.4.0](https://github.com/styayur/wutnet/releases/tag/v1.4.0) · [中文说明](docs/README.zh-CN.md) · [Windows guide](docs/WINDOWS.md) · [Field evidence](docs/FIELD_VALIDATION.md)
 
-[Download v1.4.0](https://github.com/styayur/wutnet/releases/tag/v1.4.0) · [Release notes](docs/releases/v1.4.0.md) · [Field validation](docs/FIELD_VALIDATION.md)
+For WHUT account holders who want finite CLI checks/login and optional logon/reconnect automation. The Windows client is one script with no third-party runtime modules. Windows field observations are recorded; the separate Android client remains experimental.
 
-## What it does
+## Quick start
 
-WUTNet discovers the current WHUT login session, authenticates when needed, and verifies both account status and Internet recovery. It protects the saved password with Windows DPAPI and can run on logon or network reconnect through Task Scheduler.
+Use **Windows 10/11 and PowerShell 7.2+ Core** (`pwsh.exe`); field observations cover Windows 11 with PowerShell 7.6.6. Windows PowerShell 5.1 is unsupported.
 
-The Windows client is one file: `whut-net.ps1`. The [experimental Android client](docs/ANDROID.md) is updated alongside this release.
-
-## Why WUTNet exists
-
-Repeated campus-network sign-ins should not require opening a browser every time. WUTNet performs a finite check or login, returns an exit code, and exits. It discovers campus-specific session parameters instead of storing an old portal URL.
-
-## Requirements
-
-- Windows 10 or 11; field-verified on Windows 11.
-- PowerShell **7.2+ Core** (`pwsh.exe`); field-verified with **7.6.6**.
-- An authorized WHUT account and connection to the WHUT network.
-
-Windows PowerShell 5.1 (`powershell.exe`) is not supported. No Python, browser extension, third-party PowerShell module, service or additional runtime is required by the client.
-
-## Quick Start
-
-Download `whut-net-v1.4.0-fixed.ps1` (or the identical `whut-net.ps1`) and `SHA256SUMS.txt` from the release. The examples below use the short filename; rename the downloaded script or substitute its full name. Compare the script hash with `Get-FileHash .\whut-net.ps1 -Algorithm SHA256`. Keep the script in a stable location before installing automation.
-
-Open PowerShell 7 while connected to WHUT. If Windows has marked the downloaded file, inspect it and run `Unblock-File .\whut-net.ps1`.
+Download `whut-net.ps1` and `SHA256SUMS.txt` from [v1.4.0](https://github.com/styayur/wutnet/releases/tag/v1.4.0). Keep the script in a stable directory, review it, and compare its complete hash with the matching checksum entry before running:
 
 ```powershell
-.\whut-net.ps1 setup -Username <student-id>
-.\whut-net.ps1 diagnose
-.\whut-net.ps1 login
+Get-FileHash ./whut-net.ps1 -Algorithm SHA256
+Get-Content ./SHA256SUMS.txt
+pwsh -NoProfile -File ./whut-net.ps1 help
 ```
 
-Enter the password at the secure prompt. After successful login:
-
-```powershell
-.\whut-net.ps1 status
-.\whut-net.ps1 install
-```
-
-To trust another WHUT physical network, such as WHUT-DORM in addition to WHUT-WLAN, connect to that network and explicitly register it:
-
-```powershell
-.\whut-net.ps1 trust-current -Label "WHUT-DORM"
-.\whut-net.ps1 networks
-```
-
-`trust-current` verifies the current captive WHUT session (portal/bootstrap, config, CSRF and status) before registration. It keeps the account, encrypted password and existing networks; repeats update the entry without duplication. `setup -AddNetwork` remains a compatibility alias. Ordinary `setup` now preserves registrations too; if verification is unavailable, it saves credentials without trusting a new network.
-
-Run `.\whut-net.ps1` without arguments for the same checks and one explicit **Trust & Connect** prompt on a new verified network. `auto` never prompts or enrolls. `-Json` suppresses informational logs on stdout and emits a JSON result for status, login, diagnose and network-management commands.
-
-## Commands
-
-| Command | Purpose |
-| --- | --- |
-| `setup [-Username <student-id>]` | Save credentials, preserve registrations, and add the current network only after protocol verification |
-| `run` (default) | Connect when needed; ask before trusting a new verified network |
-| `trust-current [-Label <name>]` | Verify and explicitly register the current physical network |
-| `networks [-Json]` | List registered fingerprints, labels and IDs |
-| `remove-network -NetworkId <id>` | Remove one registration |
-| `setup -AddNetwork` | Explicitly append a physical network without changing the account/password |
-| `status` | Check Internet and account state; never log in |
-| `login` | Authenticate once if needed, then verify account and Internet |
-| `auto` | Automatic mode; exit immediately if already online; otherwise require a registered fingerprint |
-| `diagnose` | Inspect discovery, bootstrap, physical fingerprint, API, CSRF and status without sending the password |
-| `install` | Register the per-user scheduled task |
-| `uninstall` | Remove the task and local configuration, credential and logs |
-| `help` | Show usage and exit codes |
-
-## Automatic Login
-
-`install` creates **WHUT-Net AutoLogin**, using the current interactive user's token and least privilege. It stores no Windows account password.
+Actual offline help excerpt (2026-10-16):
 
 ```text
-Windows Task Scheduler
-  → user logon or NetworkProfile EventID 10000
-  → pwsh -NoLogo -NoProfile -NonInteractive
-  → whut-net.ps1 auto
-  → verify or authenticate, then exit
+WHUT-Net v1.4.0
+
+Default:
+  .\whut-net.ps1
+      Smart mode: online -> exit; known WHUT -> connect; new verified WHUT ->
+      ask once whether to Trust & Connect.
 ```
 
-There is no polling loop, resident service or daemon. Overlapping task instances are ignored. Reconnect-triggered login has been field-tested without opening a browser.
+`help` creates no state or network request. **WHUT's observed portal uses HTTP. DPAPI protects the saved password at rest only; fingerprints do not cryptographically authenticate the server.** Read [security limits](SECURITY.md) before storing credentials.
 
-The executable resolver prefers `%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe`, then `$PSHOME\pwsh.exe`, then one unambiguous installed application candidate. The Store alias survives package-version changes. Re-run `install` after moving the script.
-
-## How it works
-
-Internet preflight checks NCSI content and NeverSSL identity independently. If not online, discovery tries NCSI redirect, NCSI content, NeverSSL, then the direct WHUT page. Each request has a 4-second timeout; discovery shares a 16-second request budget, with up to 8 seconds of preflight.
-
-```text
-Public HTTP probe → /api/r/<nasId> bootstrap → canonical login page
-→ config.js → safe API base → CSRF + cookies → account/status
-→ registered physical network check → late DPAPI decrypt → login POST
-→ account/status verification → Internet recovery verification
-```
-
-`nasId`, `userip`, `acip`, `acname` and `wlanacname` are discovered per session. Bootstrap is replayed in the same cookie jar before the canonical page is opened. Foreign redirects are ignored without following them or granting trust; an unknown WHUT destination returns `ProtocolChanged` (13).
-
-Only active `var|let|const host_url` declarations are parsed from config.js. Comments are ignored, identical values are deduplicated, and distinct values are rejected. A missing config permits `/api` fallback only after an active CSRF fingerprint check. Status and login JSON shapes are also validated.
-
-Authentication success means **login response + account status verification + Internet recovery verification**, not merely a successful POST.
-
-## Security Model
-
-- **Storage:** DPAPI `CurrentUser` protects the password in `%LOCALAPPDATA%\WHUT-Net\credential.dat`. Account and fingerprints are in `config.json`; bounded logs are in `whut-net.log`. These files are ignored by Git.
-- **Network registrations:** config v3 stores `trustedNetworks[]`. Existing v2 `trustedNetwork` is automatically migrated on read without changing the account or credential. Legacy v1 remains readable but needs explicit setup before automatic login.
-- **Trust checks:** auto must match one complete registered IPv4 prefix, gateway, portal host and interface type. Profile/SSID names never enroll networks or grant trust. DHCP host-address and profile suffix changes are tolerated. Interface alias changes are tolerated; interface type changes require a separate registration in both manual and automatic mode.
-- **Physical selection:** enumerate active physical adapters, exclude APIPA and `198.18.0.0/15`, and match the bootstrap `userip` exactly when supplied. Otherwise use unambiguous physical candidates/metrics. TUN route ownership alone does not select the fingerprint.
-- **Destination:** exact WHUT host/path/port checks apply to bootstrap and login. API bases must be safe relative paths. HTTP proxy use and automatic redirects are disabled.
-- **Password lifetime:** decrypt only immediately before the dedicated POST. Clear owned BSTR, character and byte buffers on success/failure. No plaintext password string is deliberately constructed. PowerShell/.NET cannot guarantee immediate removal of every runtime/HTTP-stack copy.
-- **Output:** no password, account identifier, Cookie, CSRF value, complete user IP, request body or raw server message is logged. Protocol errors are separate from credential rejection.
-
-WHUT currently uses **HTTP**. DPAPI protects the password **at rest only**. IP/path/protocol/network fingerprints are defence-in-depth, not cryptographic server authentication. This script does not manage VPNs or bind sockets to the selected adapter; a TUN/VPN can still block portal traffic or change routing after a trust check.
-
-## Field Validation
-
-**Field-verified against multiple current WHUT access environments; future portal changes may require protocol updates.** Maintainer-supplied field evidence covers Windows 11 and PowerShell 7.6.6 Core:
-
-- ✓ `/api/r/<nasId>` bootstrap and multiple campus/BRAS environments
-- ✓ Dynamic `nasId` / `userip` / `acip` / `acname`
-- ✓ Physical WLAN discovery with Meta/TUN present
-- ✓ Comment-safe config.js `/api` discovery and CSRF + cookies
-- ✓ Real credential login, status verification and Internet recovery
-- ✓ Online `status` and idempotent `auto`
-- ✓ Task installation with the Store alias and scheduled auto-login after reconnect
-
-The [engineering record](docs/FIELD_VALIDATION.md) separates these field observations from offline regression tests. The v1.4 development log also confirms listing the old v2 registration, explicitly adding WHUT-DORM while retaining WHUT-WLAN, listing both entries and successful default-mode authentication. A subsequent physical return to WHUT-WLAN is not recorded; matching either registration is covered by offline tests.
-
-## Troubleshooting
-
-| Symptom | Check |
-| --- | --- |
-| Empty reply from server | Confirm WHUT connectivity and discover a fresh campus session. The portal may be unreachable or the captured URL stale. Do not reuse an old `/api/r/<nasId>?...` URL. |
-| `ProtocolChanged` / exit 13 | WHUT frontend/API shape or redirect path may have changed. Run `diagnose`; do not bypass the allowlist. |
-| No physical fingerprint | Check WHUT connectivity, multiple physical uplinks and complete IPv4/gateway data. TUN route ownership is excluded from selection; an unmatched campus `userip` fails closed. |
-| Different campus/network refused | Connect there and explicitly run `trust-current -Label "WHUT-DORM"` (or `setup -AddNetwork`). No network is trusted merely because its profile name looks familiar. |
-| PowerShell not found / task install fails | Verify PowerShell 7 and its Store App Execution Alias at `%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe`. Multiple ambiguous fallback candidates are refused. |
-| HTTP warning | Expected: DPAPI protects storage, while WHUT's portal itself uses HTTP. |
-| Script execution blocked | Use PowerShell 7, inspect the downloaded script and unblock that file; no global policy change is required. |
-
-`diagnose` showing Internet OK means no authentication is needed. Local logs can be inspected with `Get-Content "$env:LOCALAPPDATA\WHUT-Net\whut-net.log" -Tail 50`; review any diagnostic output before sharing.
-
-| Exit | Meaning |
-| ---: | --- |
-| 0 | Successful command / online / verified login |
-| 10 | Account offline |
-| 11 | Portal not found or session `nasId` missing |
-| 12 | Untrusted network/destination or unsafe API path |
-| 13 | Unsupported or changed protocol |
-| 14 | New verified WHUT network requires explicit registration |
-| 20 | Authentication explicitly rejected |
-| 21 | Additional verification required |
-| 22 | CSRF/bootstrap request failed |
-| 30 | Portal/API unavailable |
-| 31 | Discovery exhausted after probe timeouts |
-| 40 | Network or post-authentication verification failure |
-| 50 | Local config, credential or executable-resolution error |
-
-## Architecture / Protocol
-
-<!-- architecture:overview:start -->
-```mermaid
-flowchart TD
-  Start[login / auto] --> Probe{Internet verified?}
-  Probe -->|yes| Done[Exit 0]
-  Probe -->|no| Portal[Discover and validate WHUT bootstrap / portal]
-  Portal --> Session[Replay bootstrap; config / cookies / CSRF]
-  Session --> Status{Account online?}
-  Status -->|yes| Verify[Verify Internet]
-  Status -->|no| Trust[Match a registered physical fingerprint]
-  Config[(Config: trustedNetworks)] --> Trust
-  Trust -->|registered| Decrypt[Late DPAPI decrypt]
-  Trust -->|new network| Approval{Explicit Trust & Connect?}
-  Approval -->|yes| Register[Save verified fingerprint]
-  Register --> Decrypt
-  Approval -->|no / auto| Refuse[Exit 14; no credential sent]
-  Store[(DPAPI credential)] --> Decrypt
-  Decrypt --> Login[Dedicated login POST; clear owned buffers]
-  Login --> Check[Wait 750 ms; verify account status]
-  Check --> Verify --> Result[Exit code / redacted log]
-  Scheduler[Task Scheduler: logon / reconnect] -.-> Start
-```
-<!-- architecture:overview:end -->
-
-All Windows authentication logic stays in one PowerShell file. The 750 ms delay is a single verification delay, not a retry loop. See [protocol details](docs/protocol.md) and [architecture evidence](docs/architecture/README.md). [Android notes](docs/ANDROID.md) describe the updated v1.4.0 client.
-
-## Android v1.4.0 (experimental)
-
-The same release includes an installable **debug-signed APK**, `wutnet-android-v1.4.0-debug.apk`. Android now supports dynamic `/api/r/<nasId>` bootstrap replay, shared cookies, multiple discovery probes, comment-safe config parsing and multiple explicitly registered physical Wi-Fi networks. On first login to a new verified WHUT network, tap **Trust and connect**. System-triggered login only uses an existing registration. SSIDs are neither read nor trusted.
-
-The APK has passed JVM tests, Android Lint and a build; **real-device WHUT authentication remains unverified**. It uses a development signing key, not a production signing identity. If another build has a different signature, Android requires uninstalling it before this APK can be installed; that removes local credentials and registrations. See [Android setup and security](docs/ANDROID.md) and the [device checklist](docs/android-testing.md).
-
-## Limitations
-
-This is an unofficial community client, not affiliated with WHUT. It has no CAPTCHA solver, Wi-Fi scanner, VPN manager, GUI or cloud service. Scheduled execution uses an interactive user session. Future portal changes, ambiguous physical networks or network filtering can prevent authentication; field verification is not a promise of universal campus compatibility.
-
-## Development
-
-Run from PowerShell 7 on Windows; tests use synthetic credentials and mocked transport:
+While connected to the WHUT network:
 
 ```powershell
-pwsh -NoLogo -NoProfile -File .\tests\windows.tests.ps1
-pwsh -NoLogo -NoProfile -File .\tests\check-secrets.ps1 -History
-pwsh -NoLogo -NoProfile -File .\tests\check-architecture.ps1
+./whut-net.ps1 diagnose
+./whut-net.ps1 setup -Username '<student-id>'
+./whut-net.ps1 login
+./whut-net.ps1 status
 ```
 
-Windows CI runs `Parser::ParseFile`, offline regression and the secret/local-state guard. Documentation checks are lightweight; optional Mermaid rendering remains a manual development check. Android CI runs JVM tests, Lint and a debug APK build. The secret guard is intentionally small, not an exhaustive secret scanner.
+Diagnostics/status do not send the password, but make network requests, can write logs and can migrate old configuration. They are not strictly read-only. `setup` prompts securely for the password and saves it for the current Windows user. There is no general Dry Run mode. [Download blocking and verification details](docs/WINDOWS.md#download-and-verify) explain reviewed-file unblocking without changing execution policy.
 
-## License
+## Everyday use
 
-[MIT](LICENSE). See [third-party notices](THIRD_PARTY.md) and the repository owner's [license policy](https://github.com/styayur/styayur/blob/main/LICENSE_POLICY.md). Use only an account and network you are authorized to access.
+```powershell
+./whut-net.ps1 networks -Json
+# On another verified WHUT network, explicitly register it:
+./whut-net.ps1 trust-current -Label 'WHUT-DORM'
+# Connect when needed; ask before trusting a new verified network:
+./whut-net.ps1 run
+```
+
+`setup` preserves existing network registrations; `trust-current` preserves the saved account/password. `auto` never prompts or enrolls a network. Profile/SSID labels alone do not grant trust. Successful login requires account-status and Internet-recovery checks, not just an HTTP POST.
+
+After a successful manual login, you may explicitly run `./whut-net.ps1 install` to register **WHUT-Net AutoLogin** for user logon/network reconnect. It runs a finite `auto` invocation with the interactive user's token; there is no polling daemon. Nothing schedules itself during setup or normal login. Reinstall the task after moving the script.
+
+## Stop, remove and recover
+
+Every invocation exits. **No logout command is implemented**; use the campus portal to end the server-side session. You can disable the scheduled task without deleting credentials, or remove one registered network. See [Windows removal and recovery](docs/WINDOWS.md#stop-automation-remove-trust-or-uninstall).
+
+`uninstall` deletes local credentials/configuration/logs after attempting task removal. **It can return 0 even when Task Scheduler removal fails.** Verify task removal separately; there is no automatic undo or backup. Removing script/state does not log out of WHUT.
+
+## Platform scope and limits
+
+| Platform | Delivered behavior | Verification boundary |
+| --- | --- | --- |
+| Windows | Single PowerShell file, DPAPI storage, manual login and optional scheduled automation | Maintainer-supplied field observations plus offline regression; not universal campus compatibility |
+| Android | Separate Wi-Fi-bound client with Keystore storage | Experimental debug-signed APK; JVM/Lint/build evidence, real-device WHUT authentication unverified |
+
+VPN/TUN software can still block or reroute traffic; Windows requests are not socket-bound to the selected physical adapter. Unknown portal shapes, ambiguous interfaces or changed campus infrastructure can stop authentication. The client does not solve CAPTCHAs or manage VPNs. Android signing changes can require uninstall/reinstall and loss of local data; see [Android setup](docs/ANDROID.md).
+
+## Documentation
+
+[Windows commands, checksums, exit codes and troubleshooting](docs/WINDOWS.md) · [Protocol](docs/protocol.md) · [Architecture evidence](docs/architecture/README.md) · [Field validation](docs/FIELD_VALIDATION.md) · [Android device checklist](docs/android-testing.md) · [Release notes](docs/releases/v1.4.0.md)
+
+<a id="commands"></a>
+<a id="automatic-login"></a>
+<a id="architecture--protocol"></a>
+
+## License, contributing and security
+
+[MIT](LICENSE) · [Contributing and tests](CONTRIBUTING.md) · [Security](SECURITY.md) · [Third-party notices](THIRD_PARTY.md)
+
+Unofficial community project, unaffiliated with WHUT. Reversibility is limited to the documented task/configuration operations; credential deletion and remote sessions require separate handling.

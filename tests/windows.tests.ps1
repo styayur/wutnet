@@ -668,6 +668,49 @@ Test-Case 'CLI networks table and JSON reach stdout with isolated local state' {
     }
 }
 
+foreach ($scenario in @('removed', 'absent', 'denied', 'connect-failed')) {
+    Test-Case "uninstall preserves recoverability: $scenario" {
+        $savedDataDir = $Script:DataDir
+        $temporaryData = Join-Path ([IO.Path]::GetTempPath()) ('whut-uninstall-test-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $temporaryData | Out-Null
+        Set-Content -LiteralPath (Join-Path $temporaryData 'synthetic-state.txt') 'recoverable'
+        $Script:DataDir = $temporaryData
+        function New-Object {
+            param($ComObject)
+            Assert-Equal $ComObject 'Schedule.Service'
+            $fake = [pscustomobject]@{ Scenario = $scenario }
+            $fake | Add-Member ScriptMethod Connect {
+                if ($this.Scenario -eq 'connect-failed') { throw 'synthetic service connection failure' }
+            }
+            $fake | Add-Member ScriptMethod GetFolder { param($Path) return $this }
+            $fake | Add-Member ScriptMethod DeleteTask {
+                param($Name, $Flags)
+                if ($this.Scenario -eq 'absent') { throw [Runtime.InteropServices.COMException]::new('synthetic absent task', -2147024894) }
+                if ($this.Scenario -eq 'denied') { throw [Runtime.InteropServices.COMException]::new('synthetic access denied', -2147024891) }
+            }
+            return $fake
+        }
+        try {
+            $result = Uninstall-Whut
+            if ($scenario -in @('denied', 'connect-failed')) {
+                Assert-Equal $result 1
+                Assert-Equal (Get-Content -LiteralPath (Join-Path $temporaryData 'synthetic-state.txt')) 'recoverable'
+            }
+            else {
+                Assert-Equal $result 0
+                Assert-True (-not (Test-Path -LiteralPath $temporaryData))
+            }
+        }
+        finally {
+            $Script:DataDir = $savedDataDir
+            if (Test-Path -LiteralPath $temporaryData) {
+                Remove-Item -LiteralPath (Join-Path $temporaryData 'synthetic-state.txt')
+                Remove-Item -LiteralPath $temporaryData
+            }
+        }
+    }
+}
+
 Write-Host "$script:passed passed; $script:failed failed"
 if ($script:failed) { exit 1 }
 exit 0

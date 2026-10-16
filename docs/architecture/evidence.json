@@ -1,7 +1,7 @@
 {
   "source_version": "v1.4.0",
   "reviewed_on": "2026-10-11",
-  "diagram_source": "README.md",
+  "diagram_source": "docs/architecture/README.md",
   "sources": [
     {
       "path": "whut-net.ps1",

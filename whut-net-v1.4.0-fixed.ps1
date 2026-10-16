@@ -2197,11 +2197,21 @@ function Uninstall-Whut {
         $service = New-Object -ComObject 'Schedule.Service'
         $service.Connect()
         $root = $service.GetFolder('\')
-        $root.DeleteTask($Script:TaskName, 0)
-        Write-Host "[INFO]  Scheduled task removed."
+        try {
+            $root.DeleteTask($Script:TaskName, 0)
+            Write-Host "[INFO]  Scheduled task removed."
+        }
+        catch {
+            # Only ERROR_FILE_NOT_FOUND from DeleteTask proves the task is absent.
+            $cause = $_.Exception
+            while ($null -ne $cause.InnerException) { $cause = $cause.InnerException }
+            if ($cause.HResult -ne -2147024894) { throw }
+            Write-Host '[INFO]  Scheduled task was already absent.'
+        }
     }
     catch {
-        Write-Host "[INFO]  Scheduled task was not present or could not be removed."
+        Write-Host '[ERROR] Scheduled task removal failed; local configuration and credentials retained. Retry uninstall after resolving Task Scheduler access.'
+        return 1
     }
 
     if (Test-Path -LiteralPath $Script:DataDir) {
