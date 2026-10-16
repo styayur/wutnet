@@ -1,1 +1,1 @@
-- [ ] If this changes architecture, data flow, persistence or security boundaries, I reviewed the README diagram and `docs/architecture/evidence.json` (or explained why no update is needed).
+- [ ] If this changes architecture, data flow, persistence or security boundaries, I reviewed the diagram in `docs/architecture/README.md` and `docs/architecture/evidence.json` (or explained why no update is needed).
