@@ -62,7 +62,7 @@ After a successful manual login, you may explicitly run `./whut-net.ps1 install`
 
 Every invocation exits. **No logout command is implemented**; use the campus portal to end the server-side session. You can disable the scheduled task without deleting credentials, or remove one registered network. See [Windows removal and recovery](docs/WINDOWS.md#stop-automation-remove-trust-or-uninstall).
 
-`uninstall` deletes local credentials/configuration/logs after attempting task removal. **It can return 0 even when Task Scheduler removal fails.** Verify task removal separately; there is no automatic undo or backup. Removing script/state does not log out of WHUT.
+In the published v1.4.0 script, `uninstall` deletes local credentials/configuration/logs after attempting task removal and **can return 0 even when Task Scheduler removal fails**. Current source fixes this: it returns 1 and retains local state when task removal fails, deleting state only after successful removal or confirmation that the task is absent. Verify task removal separately; there is no automatic undo or backup. Removing script/state does not log out of WHUT.
 
 ## Platform scope and limits
 
