@@ -22,6 +22,13 @@ try {
         WorkingDirectory=$directory
     }
     Initialize-WhutLauncher $spec
+    $zeroLauncher=Join-Path $directory 'synthetic no-child.vbs'
+    [IO.File]::WriteAllText($zeroLauncher, 'WScript.Quit 0', [Text.Encoding]::Unicode)
+    $rejected=$false
+    try { Test-WhutLauncher ([pscustomobject]@{Execute=$spec.Execute;LauncherPath=$zeroLauncher}) }
+    catch { if ($_.Exception.Data['ExitCode'] -eq 50) { $rejected=$true } else { throw } }
+    if (-not $rejected) { throw 'Probe accepted zero without proof of child execution' }
+    Write-Host 'PASS launcher probe rejects synthetic zero exit without child execution'
     $start=[Diagnostics.ProcessStartInfo]::new()
     $start.FileName=$spec.Execute; $start.UseShellExecute=$false; $start.CreateNoWindow=$true
     foreach ($argument in @('//B','//NoLogo',$spec.LauncherPath)) { $start.ArgumentList.Add($argument) }

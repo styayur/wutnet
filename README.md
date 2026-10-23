@@ -68,7 +68,7 @@ v1.5.0 `uninstall` removes local state, including the launcher, only after task 
 
 ## Testing and CI
 
-[Windows CI](https://github.com/styayur/wutnet/actions/workflows/windows.yml) retains syntax, dependency-free offline regression and secret/history checks, and gates Error/Warning findings with pinned PSScriptAnalyzer 1.24.0. Its matrix exercises PowerShell 7.2.24 and the Windows runner version. [Local validation](CONTRIBUTING.md) also separates safe WSH exit-code/COM XML integration from synthetic tests; neither authenticates to campus or installs a real task.
+[Windows CI](https://github.com/styayur/wutnet/actions/workflows/windows.yml) retains syntax, dependency-free offline regression and secret/history checks, and gates Error/Warning findings with pinned PSScriptAnalyzer 1.23.0. Its matrix exercises PowerShell 7.2.24 and the Windows runner version. [Local validation](CONTRIBUTING.md) also separates safe WSH exit-code/COM XML integration from synthetic tests; neither authenticates to campus or installs a real task.
 
 Historical authentication/reconnect and supplied v1.4 hidden-window/unlock evidence remain in [field validation](docs/FIELD_VALIDATION.md). New automated coverage does not establish real-device sleep-resume, every standby mode or periodic recovery acceptance.
 

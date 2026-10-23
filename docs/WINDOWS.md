@@ -74,7 +74,7 @@ The generated UTF-16 launcher is managed under `%LOCALAPPDATA%\WHUT-Net`. It con
 
 The daily window restarts every day, including after the first day. It is active throughout the day while the user's interactive token is available; it does not wake the computer. `StartWhenAvailable` permits catch-up. Each process has a `PT2M` execution limit, `IgnoreNew` overlapping-instance policy, a local auto mutex, 30-second success cooldown and failure backoff of 30, 120 then 300 seconds. Healthy Internet causes an early exit; unknown networks are never auto-enrolled. No polling loop runs inside PowerShell.
 
-Installation constructs the full task afresh, asks Windows to validate its XML with `TASK_VALIDATE_ONLY`, writes/readback-checks a temporary launcher and safely probes WSH by running only `pwsh -Command "exit 0"`. It atomically replaces the managed launcher only after that probe passes, then registers with `TASK_CREATE_OR_UPDATE`. WSH/VBScript unavailability, policy blocking or launcher failure stops installation; no direct visible-console fallback is used. An existing launcher survives generation/probe failure. Registration failure reports its actual error and keeps configuration, credentials and the prepared launcher for retry. Resolve the cause and rerun `install`; do not edit a manual VBS in another directory.
+Installation constructs the full task afresh, asks Windows to validate its XML with `TASK_VALIDATE_ONLY`, writes/readback-checks a temporary launcher and safely probes WSH by running only `pwsh -Command "exit 73"`. The distinctive expected result proves child execution even if a blocked host returns zero. It atomically replaces the managed launcher only after that probe passes, then registers with `TASK_CREATE_OR_UPDATE`. WSH/VBScript unavailability, policy blocking or launcher failure stops installation; no direct visible-console fallback is used. An existing launcher survives generation/probe failure. Registration failure reports its actual error and keeps configuration, credentials and the prepared launcher for retry. Resolve the cause and rerun `install`; do not edit a manual VBS in another directory.
 
 Historical reconnect and supplied hidden-window/unlock observations remain separate from new offline and safe local integration results in [field validation](FIELD_VALIDATION.md). They do not establish universal standby compatibility.
 
@@ -138,5 +138,5 @@ There is no automatic backup/undo for credential replacement, registration remov
 | 22 | CSRF/bootstrap request failed |
 | 30 | Portal/API unavailable |
 | 31 | Discovery exhausted after probe timeouts |
-| 40 | Network or post-authentication verification failure |
+| 40 | Network, task registration or post-authentication verification failure |
 | 50 | Local config, credential or executable-resolution error |

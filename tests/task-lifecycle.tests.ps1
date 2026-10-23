@@ -75,6 +75,7 @@ Test-Case 'launcher quotes spaces, Unicode and VBS literals; hides, waits and pr
     Assert-True ($content.Contains('""C:\Program Files\PowerShell\7\pwsh.exe"" -NoLogo -NoProfile -NonInteractive -File ""C:\Synthetic 空间\campus & net.ps1"" auto'))
     Assert-True ($content.Contains('result = shell.Run(commandLine, 0, True)'))
     Assert-True ($content.Contains('WScript.Quit result'))
+    Assert-True ($content.Contains('-Command ""exit 73""'))
     Assert-True ($content.Contains('If Err.Number <> 0 Then WScript.Quit 50'))
     Assert-True (-not ($content -match 'credential|username|password|csrf|cookie|While|Do Until'))
     foreach ($bad in @('relative.ps1', 'C:\bad"path.ps1', "C:\bad`npath.ps1")) {
@@ -188,7 +189,14 @@ foreach ($scenario in @('repeat','launcher-fails','validation-fails','registrati
         }
         else {
             $seen=$false
-            try { Install-WhutScheduledTask | Out-Null } catch { $seen=$true }
+            try { Install-WhutScheduledTask | Out-Null }
+            catch {
+                $seen=$true
+                if ($scenario -eq 'registration-fails') {
+                    Assert-Equal $_.Exception.Data['ExitCode'] 40
+                    Assert-True ($_.Exception.Message.Contains('Synthetic registration access denied'))
+                }
+            }
             Assert-True $seen
             Assert-Equal $service.Installed 'synthetic old direct PowerShell action'
             $expected=if ($scenario -eq 'registration-fails') {2} elseif ($scenario -in @('missing-config','untrusted')) {0} else {1}

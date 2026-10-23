@@ -2159,7 +2159,7 @@ function New-WhutLauncherContent {
         }
     }
     $commandLine = '"{0}" -NoLogo -NoProfile -NonInteractive -File "{1}" auto' -f $PwshPath, $ScriptPath
-    $probeLine = '"{0}" -NoLogo -NoProfile -NonInteractive -Command "exit 0"' -f $PwshPath
+    $probeLine = '"{0}" -NoLogo -NoProfile -NonInteractive -Command "exit 73"' -f $PwshPath
     # VBScript string literals escape each embedded double quote by doubling it.
     return @'
 Option Explicit
@@ -2181,8 +2181,9 @@ WScript.Quit result
 function Test-WhutLauncher {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Spec)
-    # This executes only `pwsh -Command "exit 0"`, never WUTNet or campus requests.
+    # This executes only `pwsh -Command "exit 73"`, never WUTNet or campus requests.
     # A bounded real probe also detects WSH/VBScript policy or feature removal.
+    # A distinctive exit proves child execution, even if a blocked host returns 0.
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $Spec.Execute
     $start.UseShellExecute = $false
@@ -2198,7 +2199,7 @@ function Test-WhutLauncher {
             $process.Kill($true)
             throw 'Launcher validation timed out.'
         }
-        if ($process.ExitCode -ne 0) { throw 'Launcher validation failed.' }
+        if ($process.ExitCode -ne 73) { throw 'Launcher validation failed.' }
     }
     catch {
         Stop-Whut 50 'Hidden launcher validation failed. Check Windows Script Host/VBScript availability and application-control policy, and that PowerShell can start. No task was installed.'
@@ -2332,7 +2333,7 @@ function Install-WhutScheduledTask {
         $null
     ) }
     catch {
-        throw (New-WhutException 50 ("Task registration failed; local state and launcher retained for retry: " + $_.Exception.Message))
+        throw (New-WhutException 40 ("Task registration failed; local state and launcher retained for retry: " + $_.Exception.Message))
     }
 
     Write-Log INFO "Scheduled task '$Script:TaskName' installed (hidden launcher; logon, network, unlock, resume and two-minute recovery)."

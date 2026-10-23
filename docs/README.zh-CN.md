@@ -45,7 +45,7 @@ pwsh -NoProfile -File ./whut-net.ps1 help
 
 ## 已验证范围
 
-[Windows CI](https://github.com/styayur/wutnet/actions/workflows/windows.yml) 在 PowerShell 7.2.24 与 runner 版本上执行语法、离线回归、秘密/历史检查和固定 PSScriptAnalyzer 1.24.0 的 Error/Warning 门禁。[本地验证命令](../CONTRIBUTING.md)另列不会注册任务或访问校园网的 WSH 退出码/COM XML 集成测试。
+[Windows CI](https://github.com/styayur/wutnet/actions/workflows/windows.yml) 在 PowerShell 7.2.24 与 runner 版本上执行语法、离线回归、秘密/历史检查和固定 PSScriptAnalyzer 1.23.0 的 Error/Warning 门禁。[本地验证命令](../CONTRIBUTING.md)另列不会注册任务或访问校园网的 WSH 退出码/COM XML 集成测试。
 
 Windows 历史现场认证/重连记录、补充的 v1.4 隐藏窗口/解锁证据与本次自动化测试分别保留在[验证文档](FIELD_VALIDATION.md)。新增自动化覆盖不代表新版睡眠恢复、所有待机模式或周期重试已通过实机验收。VPN/TUN 仍可能改变路由，未来门户变更或不明确的物理网络会使认证停止，不承诺所有校区永久兼容。
 
