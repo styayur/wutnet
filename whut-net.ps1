@@ -2,7 +2,7 @@
 #requires -PSEdition Core
 <#
 .SYNOPSIS
-    WHUT-Net v1.4.0 - Lightweight Wuhan University of Technology campus network authenticator.
+    WHUT-Net v1.5.0 - Lightweight Wuhan University of Technology campus network authenticator.
 
 .DESCRIPTION
     Windows-only, zero third-party dependency PowerShell client for the WHUT captive portal.
@@ -22,7 +22,7 @@
     add transport encryption to a server that only exposes HTTP.
 
 .NOTES
-    Version: 1.4.0
+    Version: 1.5.0
     Target: PowerShell 7.2+ on Windows 10/11
 #>
 
@@ -46,7 +46,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$Script:Version = '1.4.0'
+$Script:Version = '1.5.0'
 $Script:AllowedPortalHosts = @('172.30.21.100')
 $Script:ExpectedPortalPath = '/tpl/whut/login.html'
 # Known WHUT wire protocol. All response shapes are checked before using their values.
@@ -75,7 +75,7 @@ $Script:AutoCooldownSeconds = 30
 $Script:AutoBackoffSeconds = @(30, 120, 300)
 
 if (-not $IsWindows) {
-    Write-Error 'WHUT-Net v1.4.0 is Windows-only because credential protection uses Windows DPAPI.'
+    Write-Error 'WHUT-Net v1.5.0 is Windows-only because credential protection uses Windows DPAPI.'
     exit 50
 }
 
@@ -103,7 +103,7 @@ function New-WhutException {
     return $exception
 }
 
-function Throw-Whut {
+function Stop-Whut {
     param(
         [Parameter(Mandatory)]
         [int]$ExitCode,
@@ -113,7 +113,7 @@ function Throw-Whut {
     throw (New-WhutException -ExitCode $ExitCode -Message $Message)
 }
 
-function Ensure-DataDirectory {
+function Initialize-WhutDataDirectory {
     if (-not (Test-Path -LiteralPath $Script:DataDir)) {
         New-Item -ItemType Directory -Path $Script:DataDir -Force | Out-Null
     }
@@ -138,7 +138,7 @@ function Get-IPv4Prefix {
     param([string]$Address, [ValidateRange(0,32)][int]$PrefixLength)
     $ip = [System.Net.IPAddress]::Parse($Address)
     if ($ip.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
-        Throw-Whut 50 'Invalid IPv4 network fingerprint.'
+        Stop-Whut 50 'Invalid IPv4 network fingerprint.'
     }
     $bytes = $ip.GetAddressBytes()
     for ($i = 0; $i -lt 4; $i++) {
@@ -200,8 +200,8 @@ function Get-PhysicalNetworkCandidates {
             )
             if ($addresses.Count -eq 0) { continue }
 
-            $profile = @(Get-NetConnectionProfile -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue)
-            $profileName = if ($profile.Count -eq 1) { [string]$profile[0].Name } else { '' }
+            $networkProfile = @(Get-NetConnectionProfile -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue)
+            $networkProfileName = if ($networkProfile.Count -eq 1) { [string]$networkProfile[0].Name } else { '' }
 
             $routeMetric = [int]::MaxValue
             try {
@@ -213,19 +213,19 @@ function Get-PhysicalNetworkCandidates {
                     $routeMetric = [int](($routes | Measure-Object -Property RouteMetric -Minimum).Minimum)
                 }
             }
-            catch {}
+            catch { Write-Verbose 'Optional inspection or cleanup was unavailable.' }
 
             $interfaceMetric = 0
             try {
                 $ipInterface = Get-NetIPInterface -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction Stop
                 $interfaceMetric = [int]$ipInterface.InterfaceMetric
             }
-            catch {}
+            catch { Write-Verbose 'Optional inspection or cleanup was unavailable.' }
 
             foreach ($address in $addresses) {
                 $addr = [string]$address.IPAddress
                 $items.Add([pscustomobject]@{
-                    profileName    = $profileName
+                    profileName    = $networkProfileName
                     interfaceAlias = [string]$adapter.Name
                     interfaceType  = [string]$adapter.InterfaceType
                     interfaceIndex = [int]$adapter.ifIndex
@@ -240,7 +240,7 @@ function Get-PhysicalNetworkCandidates {
             }
         }
     }
-    catch {}
+    catch { Write-Verbose 'Optional inspection or cleanup was unavailable.' }
     return @($items)
 }
 
@@ -369,6 +369,7 @@ function Get-TrustedNetworks {
 }
 
 function Test-NetworkFingerprintMatch {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'Automatic', Justification='Compatibility argument; both modes intentionally require the same complete physical fingerprint.')]
     param(
         [Parameter(Mandatory)]$Trusted,
         [Parameter(Mandatory)]$Current,
@@ -439,7 +440,7 @@ function Convert-ConfigToV3 {
 
 function Save-Config {
     param($Config)
-    Ensure-DataDirectory
+    Initialize-WhutDataDirectory
     # Replace in the same directory; never leave a partially written trust list.
     $temporary = $Script:ConfigPath + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
     try {
@@ -449,7 +450,7 @@ function Save-Config {
         }
         else { [IO.File]::Move($temporary, $Script:ConfigPath) }
     }
-    catch { Throw-Whut 50 'Could not save network configuration; existing configuration retained.' }
+    catch { Stop-Whut 50 'Could not save network configuration; existing configuration retained.' }
     finally {
         if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
     }
@@ -506,7 +507,7 @@ function Remove-TrustedNetworkFromConfig {
     )
     $before = @(Get-TrustedNetworks -Config $Config).Count
     if ($remaining.Count -eq $before) {
-        Throw-Whut 50 "Trusted network '$Id' was not found."
+        Stop-Whut 50 "Trusted network '$Id' was not found."
     }
 
     $v3 = Convert-ConfigToV3 -Config $Config -TrustedNetworks $remaining
@@ -515,6 +516,7 @@ function Remove-TrustedNetworkFromConfig {
 }
 
 function Write-Log {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidOverwritingBuiltInCmdlets', '', Justification='Single-file private logger; Write-Log is not a PowerShell Core built-in, despite the analyzer compatibility catalog.')]
     param(
         [ValidateSet('INFO', 'WARN', 'ERROR')]
         [string]$Level = 'INFO',
@@ -523,7 +525,7 @@ function Write-Log {
         [switch]$Quiet
     )
 
-    Ensure-DataDirectory
+    Initialize-WhutDataDirectory
 
     $safeMessage = ($Message -replace '[\r\n]+', ' ').Trim()
     $line = '{0} {1,-5} {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $safeMessage
@@ -541,6 +543,7 @@ function Write-Log {
     }
     catch {
         # Logging must never break authentication.
+        Write-Verbose 'Local log append was unavailable.'
     }
 
     if ($Script:JsonMode) { $Quiet = $true }
@@ -556,24 +559,24 @@ function Write-Log {
 
 function Read-Config {
     if (-not (Test-Path -LiteralPath $Script:ConfigPath)) {
-        Throw-Whut 50 "Configuration not found. Run: .\whut-net.ps1 setup"
+        Stop-Whut 50 "Configuration not found. Run: .\whut-net.ps1 setup"
     }
 
     try {
         $config = Get-Content -LiteralPath $Script:ConfigPath -Raw -Encoding utf8 | ConvertFrom-Json
     }
     catch {
-        Throw-Whut 50 'Configuration file is invalid.'
+        Stop-Whut 50 'Configuration file is invalid.'
     }
 
     $storedUsername = Get-ObjectProperty -Object $config -Name 'username'
     if ($null -eq $storedUsername -or [string]::IsNullOrWhiteSpace([string]$storedUsername)) {
-        Throw-Whut 50 'Configuration is missing username.'
+        Stop-Whut 50 'Configuration is missing username.'
     }
 
     $version = [int](Get-ObjectProperty $config 'version' 1)
     if ($version -notin @(1, 2, 3)) {
-        Throw-Whut 50 'Unsupported configuration version.'
+        Stop-Whut 50 'Unsupported configuration version.'
     }
 
     if ($version -eq 1) {
@@ -599,7 +602,7 @@ function Read-Config {
 
 function Read-ProtectedPassword {
     if (-not (Test-Path -LiteralPath $Script:CredentialPath)) {
-        Throw-Whut 50 "Credential not found. Run: .\whut-net.ps1 setup"
+        Stop-Whut 50 "Credential not found. Run: .\whut-net.ps1 setup"
     }
 
     try {
@@ -610,7 +613,7 @@ function Read-ProtectedPassword {
         return ($encrypted | ConvertTo-SecureString)
     }
     catch {
-        Throw-Whut 50 'Credential cannot be decrypted for the current Windows user. Run setup again.'
+        Stop-Whut 50 'Credential cannot be decrypted for the current Windows user. Run setup again.'
     }
 }
 
@@ -634,11 +637,11 @@ function Test-TunLikeAdapterPresent {
                     $b = ([System.Net.IPAddress]::Parse($ip)).GetAddressBytes()
                     if ($b[0] -eq 198 -and $b[1] -in 18,19) { return $true }
                 }
-                catch {}
+                catch { Write-Verbose 'Optional inspection or cleanup was unavailable.' }
             }
         }
     }
-    catch {}
+    catch { Write-Verbose 'Optional inspection or cleanup was unavailable.' }
     return $false
 }
 
@@ -664,7 +667,7 @@ function Resolve-PwshExecutable {
         return [string]$candidates[0]
     }
 
-    Throw-Whut 50 'Could not resolve a stable single pwsh.exe executable for Task Scheduler.'
+    Stop-Whut 50 'Could not resolve a stable single pwsh.exe executable for Task Scheduler.'
 }
 
 function Get-AutoState {
@@ -681,7 +684,7 @@ function Get-AutoState {
 
 function Save-AutoState {
     param([int]$FailureCount, [AllowNull()][DateTimeOffset]$NextAllowedUtc)
-    Ensure-DataDirectory
+    Initialize-WhutDataDirectory
     [pscustomobject]@{
         failureCount  = $FailureCount
         nextAllowedUtc = if ($null -eq $NextAllowedUtc) { $null } else { $NextAllowedUtc.ToString('o') }
@@ -846,7 +849,7 @@ function Get-WhutBootstrapMetadata {
     param([Parameter(Mandatory)][Uri]$Uri)
 
     if (-not (Test-TrustedBootstrapUri -Uri $Uri)) {
-        Throw-Whut 12 'Untrusted WHUT bootstrap URI.'
+        Stop-Whut 12 'Untrusted WHUT bootstrap URI.'
     }
 
     $nasId = $Uri.AbsolutePath.Substring('/api/r/'.Length)
@@ -860,7 +863,7 @@ function Get-WhutBootstrapMetadata {
             }
         }
         catch {
-            Throw-Whut 13 'ProtocolChanged: bootstrap userip is invalid.'
+            Stop-Whut 13 'ProtocolChanged: bootstrap userip is invalid.'
         }
     }
 
@@ -906,7 +909,7 @@ function Convert-BootstrapToPortalUri {
     )
 
     if (-not (Test-TrustedPortalUri -Uri $portal)) {
-        Throw-Whut 13 'ProtocolChanged: derived WHUT portal URI did not pass validation.'
+        Stop-Whut 13 'ProtocolChanged: derived WHUT portal URI did not pass validation.'
     }
 
     return $portal
@@ -941,7 +944,7 @@ function Get-WhutNetworkHint {
             }
         }
     }
-    catch {}
+    catch { Write-Verbose 'Optional inspection or cleanup was unavailable.' }
     finally {
         Close-HttpContext $context
     }
@@ -1016,7 +1019,7 @@ function Test-Internet {
                             return $false
                         }
                         if ($Script:AllowedPortalHosts -ccontains $candidate.Host) {
-                            Throw-Whut 13 'ProtocolChanged: preflight returned an unknown WHUT destination.'
+                            Stop-Whut 13 'ProtocolChanged: preflight returned an unknown WHUT destination.'
                         }
                     }
                 }
@@ -1215,11 +1218,11 @@ function Start-WhutSession {
     )
 
     if (-not (Test-TrustedPortalUri -Uri $PortalUri)) {
-        Throw-Whut 12 'Refusing to start a session with an untrusted portal.'
+        Stop-Whut 12 'Refusing to start a session with an untrusted portal.'
     }
 
     if ($null -ne $BootstrapUri -and -not (Test-TrustedBootstrapUri -Uri $BootstrapUri)) {
-        Throw-Whut 12 'Refusing to start a session with an untrusted bootstrap URI.'
+        Stop-Whut 12 'Refusing to start a session with an untrusted bootstrap URI.'
     }
 
     $context = New-HttpContext
@@ -1233,7 +1236,7 @@ function Start-WhutSession {
 
             if ($bootstrapResult.StatusCode -ge 300 -and $bootstrapResult.StatusCode -lt 400) {
                 if ($null -eq $bootstrapResult.Location) {
-                    Throw-Whut 13 'ProtocolChanged: WHUT bootstrap redirect has no Location.'
+                    Stop-Whut 13 'ProtocolChanged: WHUT bootstrap redirect has no Location.'
                 }
 
                 $next = $null
@@ -1242,19 +1245,19 @@ function Start-WhutSession {
                     [string]$bootstrapResult.Location,
                     [ref]$next
                 )) {
-                    Throw-Whut 13 'ProtocolChanged: WHUT bootstrap redirect is invalid.'
+                    Stop-Whut 13 'ProtocolChanged: WHUT bootstrap redirect is invalid.'
                 }
 
                 if (-not (Test-SafeWhutRedirectLocation ([string]$bootstrapResult.Location)) -or
                     (-not (Test-TrustedPortalUri -Uri $next) -and
                      -not (Test-TrustedBootstrapUri -Uri $next))) {
-                    Throw-Whut 13 'ProtocolChanged: WHUT bootstrap redirected outside the known protocol.'
+                    Stop-Whut 13 'ProtocolChanged: WHUT bootstrap redirected outside the known protocol.'
                 }
 
                 Write-Log INFO 'protocol=bootstrap-handshake redirect=validated'
             }
             elseif ($bootstrapResult.StatusCode -lt 200 -or $bootstrapResult.StatusCode -ge 400) {
-                Throw-Whut 30 "WHUT bootstrap handshake failed with HTTP $($bootstrapResult.StatusCode)."
+                Stop-Whut 30 "WHUT bootstrap handshake failed with HTTP $($bootstrapResult.StatusCode)."
             }
         }
 
@@ -1265,7 +1268,7 @@ function Start-WhutSession {
 
         $result = Invoke-HttpText -Context $context -Method GET -Uri $PortalUri -Headers $headers
         if ($result.StatusCode -ne 200) {
-            Throw-Whut 30 "WHUT portal handshake failed with HTTP $($result.StatusCode)."
+            Stop-Whut 30 "WHUT portal handshake failed with HTTP $($result.StatusCode)."
         }
 
         return $context
@@ -1273,13 +1276,13 @@ function Start-WhutSession {
     catch {
         Close-HttpContext $context
         if ($null -ne $_.Exception.Data['ExitCode']) { throw }
-        Throw-Whut 30 'WHUT portal handshake unavailable.'
+        Stop-Whut 30 'WHUT portal handshake unavailable.'
     }
 }
 
 function Get-ApiBasePath {
     param($Context, [Uri]$PortalUri)
-    if (-not (Test-TrustedPortalUri $PortalUri)) { Throw-Whut 12 'Untrusted bootstrap portal.' }
+    if (-not (Test-TrustedPortalUri $PortalUri)) { Stop-Whut 12 'Untrusted bootstrap portal.' }
     $configUri = [Uri]::new((Get-Origin $PortalUri) + $Script:WhutProtocol.ConfigPath)
     $result = $null
     try { $result = Invoke-HttpText $Context GET $configUri }
@@ -1288,23 +1291,23 @@ function Get-ApiBasePath {
         # Only accept executable top-level var/let/const assignments. A commented-out
         # WHUT test URL such as //var host_url = 'http://192.168.x.x/api' must not
         # create a false ambiguity. Deduplicate identical active values.
-        $matches = [regex]::Matches(
+        $apiMatches = [regex]::Matches(
             ([regex]::Replace($result.Body, '(?s)/\*.*?\*/', '')),
             '(?m)^\s*(?:var|let|const)\s+host_url\s*=\s*[''"]([^''"]+)[''"]\s*;?'
         )
         $paths = @(
-            $matches |
+            $apiMatches |
                 ForEach-Object { $_.Groups[1].Value } |
                 Sort-Object -Unique -CaseSensitive
         )
 
         if ($paths.Count -gt 1) {
-            Throw-Whut 13 'ProtocolChanged: multiple distinct API base paths.'
+            Stop-Whut 13 'ProtocolChanged: multiple distinct API base paths.'
         }
 
         if ($paths.Count -eq 1) {
             $path = $paths[0]
-            if (-not (Test-SafeApiBasePath $path)) { Throw-Whut 12 'config.js returned an unsafe API base path.' }
+            if (-not (Test-SafeApiBasePath $path)) { Stop-Whut 12 'config.js returned an unsafe API base path.' }
             return $path
         }
     }
@@ -1312,7 +1315,7 @@ function Get-ApiBasePath {
     try {
         [void](Get-CsrfToken $Context $PortalUri $Script:WhutProtocol.FallbackBase)
     }
-    catch { Throw-Whut 13 'UnsupportedProtocol: /api fallback fingerprint did not match.' }
+    catch { Stop-Whut 13 'UnsupportedProtocol: /api fallback fingerprint did not match.' }
     Write-Log WARN 'protocol=fallback-csrf-validated; status fingerprint still required'
     return $Script:WhutProtocol.FallbackBase
 }
@@ -1320,7 +1323,7 @@ function Get-ApiBasePath {
 function Get-WhutApiUri {
     param([Uri]$PortalUri, [string]$ApiBasePath, [string]$Endpoint)
     if (-not (Test-TrustedPortalUri $PortalUri) -or -not (Test-SafeApiBasePath $ApiBasePath)) {
-        Throw-Whut 12 'Untrusted portal or unsafe API base path.'
+        Stop-Whut 12 'Untrusted portal or unsafe API base path.'
     }
     return [Uri]::new((Get-Origin $PortalUri) + $ApiBasePath + $Endpoint)
 }
@@ -1328,8 +1331,8 @@ function Get-WhutApiUri {
 function Read-WhutProtocolResponse {
     param($Result, [ValidateSet('Csrf','Status','Login')][string]$Kind)
     if ($Result.StatusCode -ne 200) {
-        if ($Kind -eq 'Csrf') { Throw-Whut 22 'CSRF/bootstrap endpoint unavailable.' }
-        Throw-Whut 30 'WHUT API endpoint unavailable.'
+        if ($Kind -eq 'Csrf') { Stop-Whut 22 'CSRF/bootstrap endpoint unavailable.' }
+        Stop-Whut 30 'WHUT API endpoint unavailable.'
     }
     $document = $null
     try {
@@ -1353,7 +1356,7 @@ function Read-WhutProtocolResponse {
         # Do not return raw messages, unexpected fields, or reflected credentials.
         return [pscustomobject]@{ code = $code }
     }
-    catch { Throw-Whut 13 "ProtocolChanged: $Kind response fingerprint did not match." }
+    catch { Stop-Whut 13 "ProtocolChanged: $Kind response fingerprint did not match." }
     finally { if ($null -ne $document) { $document.Dispose() } }
 }
 
@@ -1365,7 +1368,7 @@ function Get-CsrfToken {
             Accept = 'application/json, */*'; Referer = $PortalUri.AbsoluteUri
         }
     }
-    catch { Throw-Whut 22 'CSRF/bootstrap request failed.' }
+    catch { Stop-Whut 22 'CSRF/bootstrap request failed.' }
     return Read-WhutProtocolResponse $result Csrf
 }
 
@@ -1378,7 +1381,7 @@ function Get-WhutAccountStatus {
             'X-Requested-With' = 'XMLHttpRequest'; 'X-Csrf-Token' = $CsrfToken
         }
     }
-    catch { Throw-Whut 30 'WHUT status request failed.' }
+    catch { Stop-Whut 30 'WHUT status request failed.' }
     return Read-WhutProtocolResponse $result Status
 }
 
@@ -1405,11 +1408,11 @@ function Invoke-WhutLogin {
           [string]$NasId, [string]$User, $Config, [switch]$Automatic, [string]$UserIpHint)
     $uri = Get-WhutApiUri $PortalUri $ApiBasePath $Script:WhutProtocol.LoginPath
     if ([string]::IsNullOrWhiteSpace($NasId) -or $NasId.Length -gt 1024 -or $NasId -match '[\x00-\x1f\x7f]') {
-        Throw-Whut 11 'Trusted portal is reachable, but a valid session nasId was not discovered.'
+        Stop-Whut 11 'Trusted portal is reachable, but a valid session nasId was not discovered.'
     }
     # Re-read the physical network immediately before releasing the credential.
     if (-not (Test-TrustedLocalNetwork $Config -Automatic:$Automatic -UserIpHint $UserIpHint)) {
-        Throw-Whut 12 'Current physical network changed or is no longer trusted; credentials were not sent.'
+        Stop-Whut 12 'Current physical network changed or is no longer trusted; credentials were not sent.'
     }
     $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Post, $uri)
     $response = $null
@@ -1456,8 +1459,8 @@ function Invoke-WhutLogin {
         $localCredentialError = $_.Exception.Data['ExitCode'] -eq 50
         # Do not retain the original transport ErrorRecord in PowerShell's error history.
         [void]$Error.Remove($_)
-        if ($localCredentialError) { Throw-Whut 50 'Stored credential could not be read for the current Windows user.' }
-        Throw-Whut 30 'WHUT credential POST failed; request details suppressed.'
+        if ($localCredentialError) { Stop-Whut 50 'Stored credential could not be read for the current Windows user.' }
+        Stop-Whut 30 'WHUT credential POST failed; request details suppressed.'
     }
     finally {
         $request.Dispose()
@@ -1476,23 +1479,23 @@ function Invoke-WhutLogin {
     catch {
         $code = $_.Exception.Data['ExitCode']
         [void]$Error.Remove($_)
-        if ($code -eq 13) { Throw-Whut 13 'ProtocolChanged: Login response fingerprint did not match.' }
-        Throw-Whut 30 'WHUT login response unavailable.'
+        if ($code -eq 13) { Stop-Whut 13 'ProtocolChanged: Login response fingerprint did not match.' }
+        Stop-Whut 30 'WHUT login response unavailable.'
     }
     finally { $result = $null; $response.Dispose(); $response = $null }
-    if ($data.code -eq $Script:WhutProtocol.VerificationCode) { Throw-Whut 21 'Login requires additional verification or code check.' }
-    if ($data.code -ne $Script:WhutProtocol.OnlineCode) { Throw-Whut 20 'Authentication rejected by WHUT.' }
+    if ($data.code -eq $Script:WhutProtocol.VerificationCode) { Stop-Whut 21 'Login requires additional verification or code check.' }
+    if ($data.code -ne $Script:WhutProtocol.OnlineCode) { Stop-Whut 20 'Authentication rejected by WHUT.' }
     return $data
 }
 
 function Resolve-PortalSession {
     $discovery = Find-WhutPortal
     if ($discovery.State -eq 'InternetOnline') { return $null }
-    if ($discovery.ExitCode -ne 0) { Throw-Whut $discovery.ExitCode $discovery.State }
+    if ($discovery.ExitCode -ne 0) { Stop-Whut $discovery.ExitCode $discovery.State }
     $portal = $discovery.Portal
 
     if (-not (Test-TrustedPortalUri -Uri $portal)) {
-        Throw-Whut 12 'Discovered captive portal is not trusted.'
+        Stop-Whut 12 'Discovered captive portal is not trusted.'
     }
 
     $nasId = $discovery.NasId
@@ -1558,10 +1561,11 @@ function Invoke-NetworksCommand {
 }
 
 function Invoke-RemoveNetworkCommand {
-    param([string]$Id)
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Id)
 
     if ([string]::IsNullOrWhiteSpace($Id)) {
-        Throw-Whut 50 'remove-network requires -NetworkId <id>.'
+        Stop-Whut 50 'remove-network requires -NetworkId <id>.'
     }
 
     $config = Read-Config
@@ -1581,23 +1585,24 @@ function Invoke-RemoveNetworkCommand {
 }
 
 function Invoke-TrustCurrentCommand {
+    [CmdletBinding()]
     param([string]$RequestedLabel)
 
     $config = Read-Config
 
     if (Test-Internet) {
-        Throw-Whut 50 'Current Internet is already validated. Reconnect while captive so WHUT can be verified before trusting this network.'
+        Stop-Whut 50 'Current Internet is already validated. Reconnect while captive so WHUT can be verified before trusting this network.'
     }
 
     $resolved = $null
     try {
         $resolved = Resolve-PortalSession
         if ($null -eq $resolved) {
-            Throw-Whut 50 'No captive WHUT session is available to verify the current network.'
+            Stop-Whut 50 'No captive WHUT session is available to verify the current network.'
         }
 
         if ([string]::IsNullOrWhiteSpace([string]$resolved.NasId)) {
-            Throw-Whut 11 'A current WHUT session nasId is required before registering this network.'
+            Stop-Whut 11 'A current WHUT session nasId is required before registering this network.'
         }
 
         # Require a valid status response before persisting the new network.
@@ -1609,7 +1614,7 @@ function Invoke-TrustCurrentCommand {
 
         $fingerprint = Get-CurrentNetworkFingerprint -UserIpHint $resolved.UserIpHint
         if ($null -eq $fingerprint) {
-            Throw-Whut 50 'Could not identify one unambiguous physical network.'
+            Stop-Whut 50 'Could not identify one unambiguous physical network.'
         }
 
         $entry = Add-TrustedNetworkToConfig `
@@ -1702,6 +1707,7 @@ function Invoke-StatusCommand {
 }
 
 function Invoke-LoginCommand {
+    [CmdletBinding()]
     param(
         [switch]$Automatic,
         [switch]$PromptForTrust
@@ -1753,12 +1759,12 @@ function Invoke-LoginCommand {
         }
 
         if ([string]::IsNullOrWhiteSpace([string]$resolved.NasId)) {
-            Throw-Whut 11 'A current WHUT session nasId is required before authentication or registration.'
+            Stop-Whut 11 'A current WHUT session nasId is required before authentication or registration.'
         }
         $config = Read-Config
         $current = Get-CurrentNetworkFingerprint -UserIpHint $resolved.UserIpHint
         if ($null -eq $current) {
-            Throw-Whut 12 'Current physical network could not be identified safely.'
+            Stop-Whut 12 'Current physical network could not be identified safely.'
         }
 
         $match = Find-TrustedNetworkMatch -Config $config -Current $current -Automatic:$Automatic
@@ -1777,7 +1783,7 @@ function Invoke-LoginCommand {
             }
 
             if ($Automatic -or -not $PromptForTrust) {
-                Throw-Whut 14 'New WHUT physical network detected; explicit trust is required before credentials can be sent.'
+                Stop-Whut 14 'New WHUT physical network detected; explicit trust is required before credentials can be sent.'
             }
 
             Write-Host ''
@@ -1794,7 +1800,7 @@ function Invoke-LoginCommand {
             }
 
             if (-not $approved) {
-                Throw-Whut 14 'Current WHUT network was not trusted; credentials were not sent.'
+                Stop-Whut 14 'Current WHUT network was not trusted; credentials were not sent.'
             }
 
             $entry = Add-TrustedNetworkToConfig `
@@ -1824,11 +1830,11 @@ function Invoke-LoginCommand {
             -CsrfToken $resolved.CsrfToken
 
         if ([int](Get-ObjectProperty -Object $verified -Name 'code') -ne $Script:WhutProtocol.OnlineCode) {
-            Throw-Whut 40 'Login endpoint accepted the request, but account status verification failed.'
+            Stop-Whut 40 'Login endpoint accepted the request, but account status verification failed.'
         }
 
         if (-not (Test-Internet)) {
-            Throw-Whut 40 'WHUT authentication succeeded, but the Internet probe still fails.'
+            Stop-Whut 40 'WHUT authentication succeeded, but the Internet probe still fails.'
         }
 
         Write-Log INFO 'Authentication successful; Internet connectivity verified.'
@@ -1886,7 +1892,7 @@ function Invoke-AutoCommand {
         }
     }
     finally {
-        try { $mutex.ReleaseMutex() } catch {}
+        try { $mutex.ReleaseMutex() } catch { Write-Verbose 'Optional inspection or cleanup was unavailable.' }
         $mutex.Dispose()
     }
 }
@@ -1988,15 +1994,16 @@ function Invoke-DiagnoseCommand {
 }
 
 function Invoke-SetupCommand {
+    [CmdletBinding()]
     param(
         [string]$RequestedUsername
     )
 
-    Ensure-DataDirectory
+    Initialize-WhutDataDirectory
 
     $existingConfig = $null
     if (Test-Path -LiteralPath $Script:ConfigPath) {
-        try { $existingConfig = Read-Config } catch {}
+        try { $existingConfig = Read-Config } catch { Write-Verbose 'Optional inspection or cleanup was unavailable.' }
     }
 
     $user = $RequestedUsername
@@ -2009,13 +2016,13 @@ function Invoke-SetupCommand {
     $user = $user.Trim()
 
     if ([string]::IsNullOrWhiteSpace($user)) {
-        Throw-Whut 50 'Username cannot be empty.'
+        Stop-Whut 50 'Username cannot be empty.'
     }
 
     $password = Read-Host 'WHUT campus network password' -AsSecureString
     if ($password.Length -eq 0) {
         $password.Dispose()
-        Throw-Whut 50 'Password cannot be empty.'
+        Stop-Whut 50 'Password cannot be empty.'
     }
 
     $trustedNetworks = @()
@@ -2105,43 +2112,132 @@ function Invoke-SetupCommand {
 }
 
 function New-WhutTaskActionSpec {
-    param([string]$ScriptPath = $PSCommandPath)
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ScriptPath)
     if ([string]::IsNullOrWhiteSpace($ScriptPath) -or
         -not [IO.Path]::IsPathFullyQualified($ScriptPath) -or
         $ScriptPath -match '["\x00-\x1f\x7f]' -or
         -not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) {
-        Throw-Whut 50 'The script must be saved at a valid absolute path before installing the task.'
+        Stop-Whut 50 'The script must be saved at a valid absolute path before installing the task.'
     }
+    $pwshPath = [string](Resolve-PwshExecutable)
+    $hostPath = [string](Resolve-WhutScriptHost)
+    if (-not [IO.Path]::IsPathFullyQualified($pwshPath) -or
+        $pwshPath -match '["\x00-\x1f\x7f]' -or
+        -not (Test-Path -LiteralPath $pwshPath -PathType Leaf)) {
+        Stop-Whut 50 'Resolved PowerShell executable is not a valid absolute file path.'
+    }
+    $launcherPath = Join-Path $Script:DataDir 'wutnet-hidden.vbs'
     return [pscustomobject]@{
-        Execute = [string](Resolve-PwshExecutable)
-        Arguments = '-NoLogo -NoProfile -NonInteractive -File "{0}" auto' -f $ScriptPath
+        Execute = $hostPath
+        Arguments = '//B //NoLogo "{0}"' -f $launcherPath
         WorkingDirectory = [string](Split-Path -Parent $ScriptPath)
+        LauncherPath = $launcherPath
+        LauncherContent = New-WhutLauncherContent -PwshPath $pwshPath -ScriptPath $ScriptPath
     }
 }
 
-function Install-WhutScheduledTask {
-    if (-not (Test-Path -LiteralPath $Script:ConfigPath) -or
-        -not (Test-Path -LiteralPath $Script:CredentialPath)) {
-        Throw-Whut 50 'Run setup before installing the scheduled task.'
+function Resolve-WhutScriptHost {
+    $path = Join-Path ([Environment]::GetFolderPath('System')) 'wscript.exe'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        Stop-Whut 50 'Windows Script Host (wscript.exe) is unavailable. Install requires an enabled Windows Script Host; no visible-console fallback is used.'
     }
+    return [string]$path
+}
 
-    $config = Read-Config
-    if (@(Get-TrustedNetworks -Config $config).Count -eq 0) {
-        Throw-Whut 50 'Install requires at least one trusted WHUT physical network. Use setup or trust-current first.'
+function New-WhutLauncherContent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$PwshPath,
+        [Parameter(Mandatory)][string]$ScriptPath
+    )
+    foreach ($path in @($PwshPath, $ScriptPath)) {
+        # Windows filenames cannot contain quotes/control characters. Every argument
+        # is a file (no trailing backslash); double quotes therefore delimit it safely.
+        if (-not [IO.Path]::IsPathFullyQualified($path) -or $path -match '["\x00-\x1f\x7f]') {
+            Stop-Whut 50 'Launcher requires absolute executable/script paths without quotes or control characters.'
+        }
     }
+    $commandLine = '"{0}" -NoLogo -NoProfile -NonInteractive -File "{1}" auto' -f $PwshPath, $ScriptPath
+    $probeLine = '"{0}" -NoLogo -NoProfile -NonInteractive -Command "exit 0"' -f $PwshPath
+    # VBScript string literals escape each embedded double quote by doubling it.
+    return @'
+Option Explicit
+Dim shell, commandLine, result
+On Error Resume Next
+Set shell = CreateObject("WScript.Shell")
+If Err.Number <> 0 Then WScript.Quit 50
+commandLine = "{0}"
+If WScript.Arguments.Count = 1 Then
+    If WScript.Arguments(0) = "--wutnet-check" Then commandLine = "{1}"
+End If
+Err.Clear
+result = shell.Run(commandLine, 0, True)
+If Err.Number <> 0 Then WScript.Quit 50
+WScript.Quit result
+'@ -f $commandLine.Replace('"', '""'), $probeLine.Replace('"', '""')
+}
 
-    if ([string]::IsNullOrWhiteSpace($PSCommandPath) -or -not (Test-Path -LiteralPath $PSCommandPath)) {
-        Throw-Whut 50 'The script must be saved as a .ps1 file before installing the scheduled task.'
+function Test-WhutLauncher {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Spec)
+    # This executes only `pwsh -Command "exit 0"`, never WUTNet or campus requests.
+    # A bounded real probe also detects WSH/VBScript policy or feature removal.
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $Spec.Execute
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    foreach ($argument in @('//B', '//NoLogo', $Spec.LauncherPath, '--wutnet-check')) {
+        $start.ArgumentList.Add($argument)
     }
+    $process = $null
+    try {
+        $process = [Diagnostics.Process]::Start($start)
+        if (-not $process.WaitForExit(15000)) {
+            $process.Kill($true)
+            throw 'Launcher validation timed out.'
+        }
+        if ($process.ExitCode -ne 0) { throw 'Launcher validation failed.' }
+    }
+    catch {
+        Stop-Whut 50 'Hidden launcher validation failed. Check Windows Script Host/VBScript availability and application-control policy, and that PowerShell can start. No task was installed.'
+    }
+    finally { if ($null -ne $process) { $process.Dispose() } }
+}
 
-    $service = New-Object -ComObject 'Schedule.Service'
-    $service.Connect()
-    $root = $service.GetFolder('\')
+function Initialize-WhutLauncher {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Spec)
+    $temporary = Join-Path $Script:DataDir ('launcher-' + [guid]::NewGuid().ToString('N') + '.tmp.vbs')
+    try {
+        Initialize-WhutDataDirectory
+        # WSH understands UTF-16 with BOM, including non-ASCII Windows paths.
+        [IO.File]::WriteAllText($temporary, $Spec.LauncherContent, [Text.Encoding]::Unicode)
+        if ([IO.File]::ReadAllText($temporary) -cne $Spec.LauncherContent) {
+            throw 'Launcher readback differs.'
+        }
+        $probe = [pscustomobject]@{Execute=$Spec.Execute; LauncherPath=$temporary}
+        Test-WhutLauncher -Spec $probe
+        [IO.File]::Move($temporary, $Spec.LauncherPath, $true)
+    }
+    catch {
+        Stop-Whut 50 ('Hidden launcher could not be prepared; existing task, configuration and credential retained. ' + $_.Exception.Message)
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+    }
+}
+
+function New-WhutTaskDefinition {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Service,
+        [Parameter(Mandatory)]$Spec,
+        [Parameter(Mandatory)][string]$Identity
+    )
     $task = $service.NewTask(0)
-
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-
-    $task.RegistrationInfo.Description = 'WHUT-Net v1.4.0 auto-login on user logon and network connection.'
+    $task.RegistrationInfo.Description = "WHUT-Net v$Script:Version finite hidden auto-login: logon, network, unlock, resume and two-minute recovery."
     $task.Settings.Enabled = $true
     $task.Settings.Hidden = $true
     $task.Settings.StartWhenAvailable = $true
@@ -2170,15 +2266,63 @@ function Install-WhutScheduledTask {
 </QueryList>
 '@
 
+    $unlockTrigger = $task.Triggers.Create(11) # TASK_TRIGGER_SESSION_STATE_CHANGE
+    $unlockTrigger.Enabled = $true
+    $unlockTrigger.UserId = $Identity
+    $unlockTrigger.StateChange = 8 # TASK_SESSION_UNLOCK
+    $unlockTrigger.Delay = 'PT3S'
+
+    $resumeTrigger = $task.Triggers.Create(0) # TASK_TRIGGER_EVENT
+    $resumeTrigger.Enabled = $true
+    $resumeTrigger.Delay = 'PT3S'
+    $resumeTrigger.Subscription = @'
+<QueryList>
+  <Query Id="0" Path="System">
+    <Select Path="System">*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]]</Select>
+  </Query>
+</QueryList>
+'@
+
+    $periodicTrigger = $task.Triggers.Create(2) # TASK_TRIGGER_DAILY, not a one-shot timer
+    $periodicTrigger.Enabled = $true
+    $periodicTrigger.StartBoundary = [DateTime]::Today.ToString("yyyy-MM-dd'T'HH:mm:ss", [Globalization.CultureInfo]::InvariantCulture)
+    $periodicTrigger.DaysInterval = 1
+    $periodicTrigger.Repetition.Interval = 'PT2M'
+    $periodicTrigger.Repetition.Duration = 'P1D'
+    $periodicTrigger.Repetition.StopAtDurationEnd = $false
+
     $action = $task.Actions.Create(0) # TASK_ACTION_EXEC
-    $spec = New-WhutTaskActionSpec -ScriptPath $PSCommandPath
     $action.Path = $spec.Execute
     $action.Arguments = $spec.Arguments
     $action.WorkingDirectory = $spec.WorkingDirectory
+    return $task
+}
+
+function Install-WhutScheduledTask {
+    [CmdletBinding()]
+    param()
+    if (-not (Test-Path -LiteralPath $Script:ConfigPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $Script:CredentialPath -PathType Leaf)) {
+        Stop-Whut 50 'Run setup before installing the scheduled task.'
+    }
+    $config = Read-Config
+    if (@(Get-TrustedNetworks -Config $config).Count -eq 0) {
+        Stop-Whut 50 'Install requires at least one trusted WHUT physical network. Use setup or trust-current first.'
+    }
+    $spec = New-WhutTaskActionSpec -ScriptPath $PSCommandPath
+    $service = New-Object -ComObject 'Schedule.Service'
+    $service.Connect()
+    $root = $service.GetFolder('\')
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $task = New-WhutTaskDefinition -Service $service -Spec $spec -Identity $identity
+
+    # TASK_VALIDATE_ONLY checks the complete COM-generated XML without registration.
+    [void]$root.RegisterTaskDefinition($Script:TaskName, $task, 1, $identity, $null, 3, $null)
+    Initialize-WhutLauncher -Spec $spec
 
     # TASK_CREATE_OR_UPDATE = 6; no password is stored because this uses the current
     # interactive user's token.
-    [void]$root.RegisterTaskDefinition(
+    try { [void]$root.RegisterTaskDefinition(
         $Script:TaskName,
         $task,
         6,
@@ -2186,13 +2330,18 @@ function Install-WhutScheduledTask {
         $null,
         3,
         $null
-    )
+    ) }
+    catch {
+        throw (New-WhutException 50 ("Task registration failed; local state and launcher retained for retry: " + $_.Exception.Message))
+    }
 
-    Write-Log INFO "Scheduled task '$Script:TaskName' installed (logon + NetworkProfile EventID 10000)."
+    Write-Log INFO "Scheduled task '$Script:TaskName' installed (hidden launcher; logon, network, unlock, resume and two-minute recovery)."
     return 0
 }
 
 function Uninstall-Whut {
+    [CmdletBinding()]
+    param()
     try {
         $service = New-Object -ComObject 'Schedule.Service'
         $service.Connect()
@@ -2261,7 +2410,8 @@ Commands:
       Inspect portal, bootstrap, physical network, trust status, API and account state.
 
   install
-      Register the per-user Task Scheduler task.
+      Generate a hidden launcher and update the per-user scheduled task.
+      Triggers: logon, network connection, unlock, resume, and every two minutes.
 
   uninstall
       Remove the task and all local WHUT-Net state.
@@ -2271,10 +2421,14 @@ Commands:
 
 Options:
   -Json
-      Machine-readable JSON output for status/diagnose/networks/trust operations and errors.
+      JSON for run/setup/status/login/auto/diagnose/networks/trust-current/remove-network.
 
   -Yes
-      Approve Trust & Connect without an interactive y/N prompt in smart mode.
+      Approve Trust & Connect in run/login; cannot be combined with -Json.
+
+  -Username is setup-only (without -AddNetwork); -NetworkId is remove-network-only.
+  -Label is setup/trust-current-only; -AddNetwork is a setup compatibility alias.
+  Unsupported combinations return exit 50 before command work.
 
 Exit codes:
    0  online / login successful
@@ -2306,18 +2460,49 @@ Security:
     return 0
 }
 
+function Test-WhutCommandParameters {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$CommandName,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Arguments
+    )
+    $allowed = @{
+        Username = @('setup')
+        NetworkId = @('remove-network')
+        Label = @('setup', 'trust-current')
+        AddNetwork = @('setup')
+        Json = @('run', 'setup', 'status', 'login', 'auto', 'diagnose', 'trust-current', 'networks', 'remove-network')
+        Yes = @('run', 'login')
+    }
+    foreach ($name in $allowed.Keys) {
+        if ($name -in $Arguments.Keys -and $CommandName -notin $allowed[$name]) {
+            Stop-Whut 50 "-$name is not supported by $CommandName. See help for the command/parameter contract."
+        }
+    }
+    if ($Arguments['AddNetwork'] -and 'Username' -in $Arguments.Keys) {
+        Stop-Whut 50 'Use setup without -AddNetwork to change credentials.'
+    }
+    if ($Arguments['Json'] -and $Arguments['Yes']) {
+        Stop-Whut 50 '-Yes cannot be combined with -Json; explicitly register trust before using JSON mode.'
+    }
+    if ($CommandName -eq 'remove-network' -and [string]::IsNullOrWhiteSpace([string]$Arguments['NetworkId'])) {
+        Stop-Whut 50 'remove-network requires -NetworkId <id>.'
+    }
+}
+
 # Dot-sourcing loads functions for repeatable offline tests; direct invocation remains the CLI.
 if ($MyInvocation.InvocationName -eq '.') { return }
 
 $exitCode = 0
 
 try {
+    Test-WhutCommandParameters -CommandName $Command -Arguments $PSBoundParameters
     switch ($Command) {
         'run'            { $exitCode = Invoke-RunCommand }
         'help'           { $exitCode = Show-Help }
         'setup'          {
             if ($AddNetwork) {
-                if ($Username) { Throw-Whut 50 'Use setup without -AddNetwork to change credentials.' }
+                if ($Username) { Stop-Whut 50 'Use setup without -AddNetwork to change credentials.' }
                 $exitCode = Invoke-TrustCurrentCommand -RequestedLabel $Label
             }
             else { $exitCode = Invoke-SetupCommand -RequestedUsername $Username }

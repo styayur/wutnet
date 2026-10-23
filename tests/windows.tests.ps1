@@ -1,6 +1,10 @@
 #requires -Version 7.2
 #requires -PSEdition Core
 # Dependency-free offline regression suite. All network and stored credentials are synthetic.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification='Scoped offline doubles retain the production signatures they replace.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidOverwritingBuiltInCmdlets', '', Justification='Scoped offline doubles intentionally shadow cmdlets; never loaded by the CLI.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingConvertToSecureStringWithPlainText', '', Justification='Synthetic credential fixture only; no user password is read or used.')]
+param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -27,10 +31,10 @@ function Test-Case([string]$Name, [scriptblock]$Body) {
 function Write-Log { param($Level, $Message, [switch]$Quiet) $script:messages.Add([string]$Message) }
 $script:messages = [Collections.Generic.List[string]]::new()
 $portal = [Uri]'http://172.30.21.100/tpl/whut/login.html?nasId=test-session'
-function Response([int]$Code = 200, [string]$Body = '', $Location = $null) {
+function New-TestResponse([int]$Code = 200, [string]$Body = '', $Location = $null) {
     [pscustomobject]@{ StatusCode = $Code; Body = $Body; Location = $Location }
 }
-function Network {
+function New-TestNetwork {
     [pscustomobject]@{ profileName = 'WHUT-DORM 2'; interfaceAlias = 'Wi-Fi'; interfaceType = '71';
         ipv4Address = '10.91.4.5'; ipv4Prefix = '10.91.0.0/16'; defaultGateway = '10.91.0.1'; portalHost = '172.30.21.100' }
 }
@@ -67,7 +71,7 @@ Test-Case 'timeouts on Microsoft probes allow NeverSSL trusted redirect' {
         $script:calls++
         Assert-True ($TimeoutMilliseconds -gt 0 -and $TimeoutMilliseconds -le 4000)
         if ($script:calls -lt 3) { throw [Threading.Tasks.TaskCanceledException]::new('synthetic') }
-        Response 302 '' $portal
+        New-TestResponse 302 '' $portal
     }
     $found = Find-WhutPortal
     Assert-Equal $found.State 'PortalRedirectFound'
@@ -76,21 +80,21 @@ Test-Case 'timeouts on Microsoft probes allow NeverSSL trusted redirect' {
 }
 Test-Case 'foreign redirects are ignored without following them or reading credentials' {
     $script:calls = 0
-    function Invoke-HttpText { $script:calls++; Response 302 '' ([Uri]'http://evil.example/') }
+    function Invoke-HttpText { $script:calls++; New-TestResponse 302 '' ([Uri]'http://evil.example/') }
     function Read-ProtectedPassword { throw 'Credential read must never occur' }
     function Test-Internet { $false }
     Assert-Code { Invoke-LoginCommand -Automatic } 11
     Assert-Equal $script:calls 4
 }
 Test-Case 'relative redirect normalization cannot bypass allowlist' {
-    function Invoke-HttpText { Response 302 '' '/x/../tpl/whut/login.html' }
+    function Invoke-HttpText { New-TestResponse 302 '' '/x/../tpl/whut/login.html' }
     Assert-Equal (Find-WhutPortal).State 'ProtocolChanged'
 }
 Test-Case 'known Internet content ends discovery early' {
     $script:calls = 0
     function Invoke-HttpText {
         $script:calls++
-        if ($script:calls -eq 1) { Response 200 '<html>unknown</html>' } else { Response 200 'Microsoft Connect Test' }
+        if ($script:calls -eq 1) { New-TestResponse 200 '<html>unknown</html>' } else { New-TestResponse 200 'Microsoft Connect Test' }
     }
     Assert-Equal (Find-WhutPortal).State 'InternetOnline'
     Assert-Equal $script:calls 2
@@ -100,7 +104,7 @@ Test-Case 'first Internet probe timeout still permits independent fallback' {
     function Invoke-HttpText {
         $script:calls++
         if ($script:calls -eq 1) { throw [Threading.Tasks.TaskCanceledException]::new() }
-        Response 200 '<title>NeverSSL</title>'
+        New-TestResponse 200 '<title>NeverSSL</title>'
     }
     Assert-True (Test-Internet)
     Assert-Equal $script:calls 2
@@ -119,13 +123,13 @@ Test-Case 'budget exhaustion prevents further probes' {
     finally { $Script:DiscoveryBudgetSeconds = $saved }
 }
 Test-Case 'direct reachability remains distinct from a discovered session' {
-    function Invoke-HttpText { param($Context,$Method,$Uri) if ($Uri.Host -eq '172.30.21.100') { Response 200 'login' } else { Response 503 } }
+    function Invoke-HttpText { param($Context,$Method,$Uri) if ($Uri.Host -eq '172.30.21.100') { New-TestResponse 200 'login' } else { New-TestResponse 503 } }
     $found = Find-WhutPortal
     Assert-Equal $found.State 'WhutPortalReachable'
     Assert-Equal (Get-QueryValue $found.Portal 'nasId') $null
 }
 Test-Case 'not-found and direct-unreachable have distinct codes' {
-    function Invoke-HttpText { Response 404 }
+    function Invoke-HttpText { New-TestResponse 404 }
     Assert-Equal (Find-WhutPortal).ExitCode 11
     function Invoke-HttpText { throw [Net.Http.HttpRequestException]::new('synthetic') }
     Assert-Equal (Find-WhutPortal).ExitCode 30
@@ -133,34 +137,34 @@ Test-Case 'not-found and direct-unreachable have distinct codes' {
 Test-Case 'HTTP 200 CSRF schema mismatch is protocol error' {
     foreach ($body in @('{}','[]','null','{"csrf_token":1}','{"csrf_token":""}',
         '{"csrf_token":"first","csrf_token":"second"}','<html>login</html>')) {
-        Assert-Code { Read-WhutProtocolResponse (Response 200 $body) Csrf } 13
+        Assert-Code { Read-WhutProtocolResponse (New-TestResponse 200 $body) Csrf } 13
     }
-    Assert-Equal (Read-WhutProtocolResponse (Response 200 '{"csrf_token":"synthetic"}') Csrf) 'synthetic'
-    Assert-Code { Read-WhutProtocolResponse (Response 503) Csrf } 22
+    Assert-Equal (Read-WhutProtocolResponse (New-TestResponse 200 '{"csrf_token":"synthetic"}') Csrf) 'synthetic'
+    Assert-Code { Read-WhutProtocolResponse (New-TestResponse 503) Csrf } 22
 }
 Test-Case 'status and login shapes distinguish protocol changes from rejection' {
     foreach ($body in @('{}','{"code":"0"}','{"code":false}','{"code":1.5}',
         '{"code":0,"code":2}','{"data":{"code":0}}','{"code":2147483648}')) {
-        Assert-Code { Read-WhutProtocolResponse (Response 200 $body) Status } 13
+        Assert-Code { Read-WhutProtocolResponse (New-TestResponse 200 $body) Status } 13
     }
-    Assert-Equal (Read-WhutProtocolResponse (Response 200 '{"code":0}') Status).code 0
-    Assert-Code { Read-WhutProtocolResponse (Response 200 '{"code":0}') Login } 13
-    Assert-Code { Read-WhutProtocolResponse (Response 200 '{"code":0,"msg":null}') Login } 13
-    $data = Read-WhutProtocolResponse (Response 200 '{"code":2,"msg":"synthetic server secret"}') Login
+    Assert-Equal (Read-WhutProtocolResponse (New-TestResponse 200 '{"code":0}') Status).code 0
+    Assert-Code { Read-WhutProtocolResponse (New-TestResponse 200 '{"code":0}') Login } 13
+    Assert-Code { Read-WhutProtocolResponse (New-TestResponse 200 '{"code":0,"msg":null}') Login } 13
+    $data = Read-WhutProtocolResponse (New-TestResponse 200 '{"code":2,"msg":"synthetic server secret"}') Login
     Assert-Equal $data.code 2
     Assert-Equal @($data.PSObject.Properties).Count 1
-    Assert-Code { Read-WhutProtocolResponse (Response 500) Login } 30
+    Assert-Code { Read-WhutProtocolResponse (New-TestResponse 500) Login } 30
 }
 Test-Case 'config API path and actively validated fallback' {
-    function Invoke-HttpText { Response 200 "var host_url = '/eportal/api';" }
+    function Invoke-HttpText { New-TestResponse 200 "var host_url = '/eportal/api';" }
     Assert-Equal (Get-ApiBasePath $null $portal) '/eportal/api'
-    function Invoke-HttpText { Response 200 "var host_url = '//evil.example/api';" }
+    function Invoke-HttpText { New-TestResponse 200 "var host_url = '//evil.example/api';" }
     Assert-Code { Get-ApiBasePath $null $portal } 12
-    function Invoke-HttpText { Response 200 "var host_url = '/api';`nvar host_url = '/other';" }
+    function Invoke-HttpText { New-TestResponse 200 "var host_url = '/api';`nvar host_url = '/other';" }
     Assert-Code { Get-ApiBasePath $null $portal } 13
-    function Invoke-HttpText { param($Context,$Method,$Uri) if ($Uri.AbsolutePath.EndsWith('config.js')) { Response 404 } else { Response 200 '{"csrf_token":"synthetic"}' } }
+    function Invoke-HttpText { param($Context,$Method,$Uri) if ($Uri.AbsolutePath.EndsWith('config.js')) { New-TestResponse 404 } else { New-TestResponse 200 '{"csrf_token":"synthetic"}' } }
     Assert-Equal (Get-ApiBasePath $null $portal) '/api'
-    function Invoke-HttpText { Response 200 '{}' }
+    function Invoke-HttpText { New-TestResponse 200 '{}' }
     Assert-Code { Get-ApiBasePath $null $portal } 13
 }
 Test-Case 'endpoint helper rejects unsafe origin/base independently' {
@@ -169,24 +173,24 @@ Test-Case 'endpoint helper rejects unsafe origin/base independently' {
     Assert-Equal (Get-WhutApiUri $portal '/api' $Script:WhutProtocol.LoginPath).AbsoluteUri 'http://172.30.21.100/api/account/login'
 }
 Test-Case 'DHCP host and profile rename preserve strict network trust' {
-    $config = [pscustomobject]@{version=2;trustedNetwork=(Network)}
-    function Get-CurrentNetworkFingerprint { $n = Network; $n.profileName = 'WHUT-DORM 3'; $n.ipv4Address = '10.91.22.6'; $n }
+    $config = [pscustomobject]@{version=2;trustedNetwork=(New-TestNetwork)}
+    function Get-CurrentNetworkFingerprint { $n = New-TestNetwork; $n.profileName = 'WHUT-DORM 3'; $n.ipv4Address = '10.91.22.6'; $n }
     Assert-True (Test-TrustedLocalNetwork $config -Automatic)
     Assert-Equal (Get-IPv4Prefix '10.91.22.6' 16) '10.91.0.0/16'
     Assert-Equal (Get-IPv4Prefix '10.91.22.6' 23) '10.91.22.0/23'
 }
 Test-Case 'changed gateway/prefix/portal or absent physical route refuses auto' {
-    function Get-CurrentNetworkFingerprint { Network }
+    function Get-CurrentNetworkFingerprint { New-TestNetwork }
     foreach ($field in @('defaultGateway','ipv4Prefix','portalHost','interfaceType')) {
-        $trusted = Network; $trusted.$field = 'different'
+        $trusted = New-TestNetwork; $trusted.$field = 'different'
         Assert-True (-not (Test-TrustedLocalNetwork ([pscustomobject]@{version=2;trustedNetwork=$trusted}) -Automatic))
     }
     function Get-CurrentNetworkFingerprint { $null }
     Assert-True (-not (Test-TrustedLocalNetwork ([pscustomobject]@{version=1}) -Automatic))
 }
 Test-Case 'manual policy tolerates interface rename but never subnet/gateway mismatch' {
-    function Get-CurrentNetworkFingerprint { $n = Network; $n.interfaceAlias = 'Ethernet'; $n }
-    $config = [pscustomobject]@{version=2;trustedNetwork=(Network)}
+    function Get-CurrentNetworkFingerprint { $n = New-TestNetwork; $n.interfaceAlias = 'Ethernet'; $n }
+    $config = [pscustomobject]@{version=2;trustedNetwork=(New-TestNetwork)}
     Assert-True (Test-TrustedLocalNetwork $config)
     $config.trustedNetwork.defaultGateway = '192.168.1.1'
     Assert-True (-not (Test-TrustedLocalNetwork $config))
@@ -201,7 +205,7 @@ Test-Case 'v1 config reads without mutation; auto requires upgrade' {
         $config = Read-Config
         Assert-Equal $config.version 1
         Assert-Equal ([IO.File]::ReadAllText($tempFile)) $old
-        function Get-CurrentNetworkFingerprint { Network }
+        function Get-CurrentNetworkFingerprint { New-TestNetwork }
         Assert-True (-not (Test-TrustedLocalNetwork $config))
         Assert-True (-not (Test-TrustedLocalNetwork $config -Automatic))
     }
@@ -211,7 +215,7 @@ Test-Case 'malformed bootstrap never reads credential' {
     function Test-Internet { $false }
     function Find-WhutPortal { [pscustomobject]@{State='PortalRedirectFound';ExitCode=0;Portal=$portal;NasId=$null;UserIpHint=$null;Bootstrap=$null} }
     function Start-WhutSession { [pscustomobject]@{Client=$null} }
-    function Invoke-HttpText { Response 200 '{}' }
+    function Invoke-HttpText { New-TestResponse 200 '{}' }
     function Read-ProtectedPassword { throw 'Credential read must never occur' }
     Assert-Code { Invoke-LoginCommand -Automatic } 13
 }
@@ -228,16 +232,16 @@ Test-Case 'status fingerprint is required before credential release' {
     function Invoke-HttpText {
         param($Context,$Method,$Uri)
         switch -Wildcard ($Uri.AbsolutePath) {
-            '*config.js' { Response 200 "var host_url = '/api';" }
-            '*csrf-token' { Response 200 '{"csrf_token":"synthetic"}' }
-            default { Response 200 '{"status":"offline"}' }
+            '*config.js' { New-TestResponse 200 "var host_url = '/api';" }
+            '*csrf-token' { New-TestResponse 200 '{"csrf_token":"synthetic"}' }
+            default { New-TestResponse 200 '{"status":"offline"}' }
         }
     }
     function Read-ProtectedPassword { throw 'Credential read must never occur' }
     Assert-Code { Invoke-LoginCommand -Automatic } 13
 }
 Test-Case 'login command requires both account and Internet verification' {
-    function Get-CurrentNetworkFingerprint { Network }
+    function Get-CurrentNetworkFingerprint { New-TestNetwork }
     $script:internetCalls = 0
     $script:statusCalls = 0
     $script:postCalls = 0
@@ -249,7 +253,7 @@ Test-Case 'login command requires both account and Internet verification' {
         $script:statusCalls++
         [pscustomobject]@{code=$(if ($script:statusCalls -eq 1) {1} else {0})}
     }
-    function Read-Config { [pscustomobject]@{version=2;username='synthetic';trustedNetwork=(Network)} }
+    function Read-Config { [pscustomobject]@{version=2;username='synthetic';trustedNetwork=(New-TestNetwork)} }
     function Invoke-WhutLogin { $script:postCalls++; [pscustomobject]@{code=0} }
     function Start-Sleep { }
     Assert-Equal (Invoke-LoginCommand -Automatic) 0
@@ -319,13 +323,13 @@ Test-Case 'real HttpClient cancellation remains ProbeTimeout through PowerShell 
     }
 }
 Test-Case 'credential POST correctly encodes Unicode and clears body after success/failure' {
-    function Get-CurrentNetworkFingerprint { Network }
+    function Get-CurrentNetworkFingerprint { New-TestNetwork }
     $script:credentialReads = 0
     function Read-ProtectedPassword {
         $script:credentialReads++
         ConvertTo-SecureString 'p& +%=中文😀' -AsPlainText -Force
     }
-    $config = [pscustomobject]@{version=2;trustedNetwork=(Network)}
+    $config = [pscustomobject]@{version=2;trustedNetwork=(New-TestNetwork)}
     $handler = [WhutTestHandler]::new()
     $client = [Net.Http.HttpClient]::new($handler)
     $context = [pscustomobject]@{Client=$client}
@@ -367,7 +371,7 @@ Test-Case 'production HTTP context disables proxies and automatic redirects' {
     finally { $context.Client.Dispose() }
 }
 Test-Case 'foreign Internet preflight redirects continue without establishing trust' {
-    function Invoke-HttpText { Response 302 '' 'http://evil.example/' }
+    function Invoke-HttpText { New-TestResponse 302 '' 'http://evil.example/' }
     Assert-True (-not (Test-Internet))
 }
 Test-Case 'physical WLAN selection ignores Meta routing and excludes benchmark/APIPA addresses' {
@@ -404,15 +408,15 @@ Test-Case 'physical WLAN selection ignores Meta routing and excludes benchmark/A
     Assert-Equal (Get-CurrentNetworkFingerprint) $null
 }
 Test-Case 'config comments are excluded and duplicate active values are deduplicated' {
-    function Invoke-HttpText { Response 200 "//var host_url = 'http://192.168.85.20/api'`nvar host_url = '/api'" }
+    function Invoke-HttpText { New-TestResponse 200 "//var host_url = 'http://192.168.85.20/api'`nvar host_url = '/api'" }
     Assert-Equal (Get-ApiBasePath $null $portal) '/api'
-    function Invoke-HttpText { Response 200 "var host_url = '/api'`nconst host_url = '/api'" }
+    function Invoke-HttpText { New-TestResponse 200 "var host_url = '/api'`nconst host_url = '/api'" }
     Assert-Equal (Get-ApiBasePath $null $portal) '/api'
-    function Invoke-HttpText { Response 200 "/*`nvar host_url = '/test'`n*/`nlet host_url = '/api'" }
+    function Invoke-HttpText { New-TestResponse 200 "/*`nvar host_url = '/test'`n*/`nlet host_url = '/api'" }
     Assert-Equal (Get-ApiBasePath $null $portal) '/api'
-    function Invoke-HttpText { Response 200 "var host_url = '/api'`nvar host_url = '/api2'" }
+    function Invoke-HttpText { New-TestResponse 200 "var host_url = '/api'`nvar host_url = '/api2'" }
     Assert-Code { Get-ApiBasePath $null $portal } 13
-    function Invoke-HttpText { Response 200 "var host_url = '/api'`nvar host_url = '/API'" }
+    function Invoke-HttpText { New-TestResponse 200 "var host_url = '/api'`nvar host_url = '/API'" }
     Assert-Code { Get-ApiBasePath $null $portal } 13
 }
 # Historical private DHCP examples supplied by the maintainer; no account/credential data.
@@ -454,8 +458,8 @@ Test-Case 'foreign discovery redirect is skipped then trusted bootstrap succeeds
         param($Context,$Method,$Uri)
         $script:calls++
         Assert-True ($Uri.Host -ne 'evil.example')
-        if ($script:calls -eq 1) { Response 302 '' 'http://evil.example/' }
-        else { Response 302 '' 'http://172.30.21.100/api/r/52?userip=10.82.155.225' }
+        if ($script:calls -eq 1) { New-TestResponse 302 '' 'http://evil.example/' }
+        else { New-TestResponse 302 '' 'http://172.30.21.100/api/r/52?userip=10.82.155.225' }
     }
     $found = Find-WhutPortal
     Assert-Equal $found.State 'WhutBootstrapFound'
@@ -463,10 +467,10 @@ Test-Case 'foreign discovery redirect is skipped then trusted bootstrap succeeds
     Assert-Equal $script:calls 2
 }
 Test-Case 'unknown WHUT destinations and malformed bootstrap metadata are protocol errors' {
-    function Invoke-HttpText { Response 302 '' 'http://172.30.21.100/unknown' }
+    function Invoke-HttpText { New-TestResponse 302 '' 'http://172.30.21.100/unknown' }
     Assert-Equal (Find-WhutPortal).ExitCode 13
     Assert-Code { Test-Internet } 13
-    function Invoke-HttpText { Response 302 '' 'http://172.30.21.100/api/r/52?userip=invalid' }
+    function Invoke-HttpText { New-TestResponse 302 '' 'http://172.30.21.100/api/r/52?userip=invalid' }
     Assert-Code { Find-WhutPortal } 13
 }
 Test-Case 'bootstrap replay uses one context before opening canonical page' {
@@ -476,17 +480,17 @@ Test-Case 'bootstrap replay uses one context before opening canonical page' {
     function Invoke-HttpText {
         param($Context,$Method,$Uri)
         $script:replayCalls.Add([pscustomobject]@{Context=$Context;Uri=$Uri})
-        if ($script:replayCalls.Count -eq 1) { Response 302 '' '/tpl/whut/login.html?nasId=52' }
-        else { Response 200 'portal' }
+        if ($script:replayCalls.Count -eq 1) { New-TestResponse 302 '' '/tpl/whut/login.html?nasId=52' }
+        else { New-TestResponse 200 'portal' }
     }
     $context = Start-WhutSession $canonical $bootstrap
     Assert-Equal $script:replayCalls.Count 2
     Assert-Equal $script:replayCalls[0].Uri $bootstrap
     Assert-Equal $script:replayCalls[1].Uri $canonical
     Assert-True ([object]::ReferenceEquals($script:replayCalls[0].Context,$script:replayCalls[1].Context))
-    function Invoke-HttpText { Response 302 '' '/x/../tpl/whut/login.html' }
+    function Invoke-HttpText { New-TestResponse 302 '' '/x/../tpl/whut/login.html' }
     Assert-Code { Start-WhutSession $canonical $bootstrap } 13
-    function Invoke-HttpText { Response 302 '' 'http://evil.example/' }
+    function Invoke-HttpText { New-TestResponse 302 '' 'http://evil.example/' }
     Assert-Code { Start-WhutSession $canonical $bootstrap } 13
 }
 Test-Case 'pwsh resolver prefers stable Store alias and returns System.String' {
@@ -514,18 +518,20 @@ Test-Case 'pwsh resolver falls back to PSHOME then a unique safe application' {
     }
     Assert-Code { Resolve-PwshExecutable } 50
 }
-Test-Case 'scheduled task action contains scalar Execute, quoted script, and working directory' {
+Test-Case 'scheduled task action contains scalar WSH executable and quoted managed launcher' {
     function Resolve-PwshExecutable { [string]'C:\Users\Synthetic\AppData\Local\Microsoft\WindowsApps\pwsh.exe' }
+    function Resolve-WhutScriptHost { [string]'C:\Windows\System32\wscript.exe' }
     function Test-Path { $true }
     $spec = New-WhutTaskActionSpec 'C:\Synthetic Folder\whut-net.ps1'
     Assert-True ($spec.Execute -is [string])
-    Assert-Equal $spec.Execute 'C:\Users\Synthetic\AppData\Local\Microsoft\WindowsApps\pwsh.exe'
-    Assert-Equal $spec.Arguments '-NoLogo -NoProfile -NonInteractive -File "C:\Synthetic Folder\whut-net.ps1" auto'
+    Assert-Equal $spec.Execute 'C:\Windows\System32\wscript.exe'
+    Assert-Equal $spec.Arguments ('//B //NoLogo "{0}"' -f (Join-Path $Script:DataDir 'wutnet-hidden.vbs'))
+    Assert-True ($spec.LauncherContent.Contains('""C:\Synthetic Folder\whut-net.ps1"" auto'))
     Assert-Equal $spec.WorkingDirectory 'C:\Synthetic Folder'
     Assert-True (($spec | ConvertTo-Json) -notmatch 'String\[\]')
 }
 Test-Case 'release version and bootstrap log redaction' {
-    Assert-Equal $Script:Version '1.4.0'
+    Assert-Equal $Script:Version '1.5.0'
     $logs = $script:messages -join "`n"
     foreach ($secret in @('10.82.155.225','10.91.175.52','synthetic-csrf','test-user','password=')) {
         Assert-True (-not $logs.Contains($secret)) 'Sensitive log value found'
@@ -536,7 +542,7 @@ Test-Case 'v2 migration preserves account, credential and original trust registr
     $tempFile = [IO.Path]::GetTempFileName()
     try {
         $Script:ConfigPath = $tempFile
-        [pscustomobject]@{version=2;username='synthetic-account';trustedNetwork=(Network)} |
+        [pscustomobject]@{version=2;username='synthetic-account';trustedNetwork=(New-TestNetwork)} |
             ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $tempFile
         $config = Read-Config
         Assert-Equal $config.version 3
@@ -551,8 +557,8 @@ Test-Case 'v2 migration preserves account, credential and original trust registr
     finally { $Script:ConfigPath = $savedConfig; Remove-Item -LiteralPath $tempFile }
 }
 Test-Case 'auto accepts any registered fingerprint and never enrolls matching profile names' {
-    $first = Network
-    $second = Network
+    $first = New-TestNetwork
+    $second = New-TestNetwork
     $second.ipv4Prefix = '10.82.0.0/15'; $second.defaultGateway = '10.82.0.1'; $second.interfaceAlias = 'WLAN'
     $config = [pscustomobject]@{version=3;username='synthetic';trustedNetworks=@($first,$second)}
     function Get-CurrentNetworkFingerprint { $second }
@@ -560,10 +566,10 @@ Test-Case 'auto accepts any registered fingerprint and never enrolls matching pr
     function Get-CurrentNetworkFingerprint { $first }
     Assert-True (Test-TrustedLocalNetwork $config -Automatic)
     $before = $config | ConvertTo-Json -Depth 5
-    function Get-CurrentNetworkFingerprint { $n = Network; $n.ipv4Prefix = '192.168.0.0/24'; $n }
+    function Get-CurrentNetworkFingerprint { $n = New-TestNetwork; $n.ipv4Prefix = '192.168.0.0/24'; $n }
     Assert-True (-not (Test-TrustedLocalNetwork $config -Automatic))
     Assert-Equal ($config | ConvertTo-Json -Depth 5) $before
-    function Get-CurrentNetworkFingerprint { $n = Network; $n.defaultGateway = $second.defaultGateway; $n }
+    function Get-CurrentNetworkFingerprint { $n = New-TestNetwork; $n.defaultGateway = $second.defaultGateway; $n }
     Assert-True (-not (Test-TrustedLocalNetwork $config -Automatic)) 'Fields from different registrations must not combine'
 }
 Test-Case 'explicit AddNetwork appends once without requesting or changing credentials' {
@@ -574,7 +580,7 @@ Test-Case 'explicit AddNetwork appends once without requesting or changing crede
         $Script:DataDir = $directory
         $Script:ConfigPath = Join-Path $directory 'config.json'
         $Script:CredentialPath = Join-Path $directory 'credential.dat'
-        Save-Config ([pscustomobject]@{version=3;username='synthetic-account';trustedNetworks=@((Network))})
+        Save-Config ([pscustomobject]@{version=3;username='synthetic-account';trustedNetworks=@((New-TestNetwork))})
         Set-Content -LiteralPath $Script:CredentialPath -Value 'synthetic-encrypted-placeholder'
         $credentialHash = (Get-FileHash -LiteralPath $Script:CredentialPath).Hash
         function Read-Host { throw 'AddNetwork must not prompt for a password' }
@@ -583,7 +589,7 @@ Test-Case 'explicit AddNetwork appends once without requesting or changing crede
         function Resolve-PortalSession { [pscustomobject]@{Session=$null;Portal=$portal;ApiBasePath='/api';CsrfToken='synthetic';NasId='59';UserIpHint='10.82.155.225'} }
         function Get-WhutAccountStatus { [pscustomobject]@{code=1} }
         function Get-CurrentNetworkFingerprint {
-            $n = Network; $n.ipv4Prefix = '10.82.0.0/15'; $n.defaultGateway = '10.82.0.1'; $n.interfaceAlias = 'WLAN'; $n
+            $n = New-TestNetwork; $n.ipv4Prefix = '10.82.0.0/15'; $n.defaultGateway = '10.82.0.1'; $n.interfaceAlias = 'WLAN'; $n
         }
         Assert-Equal (Invoke-TrustCurrentCommand -RequestedLabel 'WHUT-WLAN') 0
         Assert-Equal @((Read-Config).trustedNetworks).Count 2
@@ -607,7 +613,7 @@ Test-Case 'auto refuses new network without prompt, enrollment or decrypt' {
     function Resolve-PortalSession { [pscustomobject]@{Session=$null;Portal=$portal;ApiBasePath='/api';CsrfToken='synthetic';NasId='59';UserIpHint=$null} }
     function Get-WhutAccountStatus { [pscustomobject]@{code=1} }
     function Read-Config { [pscustomobject]@{version=3;username='synthetic';trustedNetworks=@()} }
-    function Get-CurrentNetworkFingerprint { Network }
+    function Get-CurrentNetworkFingerprint { New-TestNetwork }
     function Read-Host { throw 'Unexpected prompt' }
     function Read-ProtectedPassword { throw 'Unexpected credential read' }
     function Add-TrustedNetworkToConfig { throw 'Unexpected enrollment' }
@@ -619,7 +625,7 @@ Test-Case 'trust-current rejects failed protocol before saving anything' {
     function Test-Internet { $false }
     function Read-Config { [pscustomobject]@{version=3;username='synthetic';trustedNetworks=@()} }
     function Resolve-PortalSession { [pscustomobject]@{Session=$null;Portal=$portal;ApiBasePath='/api';CsrfToken='synthetic';NasId='59';UserIpHint=$null} }
-    function Get-WhutAccountStatus { Throw-Whut 13 'Synthetic invalid status' }
+    function Get-WhutAccountStatus { Stop-Whut 13 'Synthetic invalid status' }
     function Add-TrustedNetworkToConfig { throw 'Unexpected enrollment' }
     Assert-Code { Invoke-TrustCurrentCommand } 13
 }
@@ -628,7 +634,7 @@ Test-Case 'v1.3.2 v3 entries acquire IDs and removing last entry persists an emp
     $tempFile = [IO.Path]::GetTempFileName()
     try {
         $Script:ConfigPath = $tempFile
-        [pscustomobject]@{version=3;username='synthetic';trustedNetworks=@((Network))} |
+        [pscustomobject]@{version=3;username='synthetic';trustedNetworks=@((New-TestNetwork))} |
             ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $tempFile
         $config = Read-Config
         Assert-True ($config.trustedNetworks[0].id -match '^[a-f0-9]{12}$')
@@ -644,7 +650,7 @@ Test-Case 'CLI networks table and JSON reach stdout with isolated local state' {
     try {
         $env:LOCALAPPDATA = $directory
         $path = Join-Path $data 'config.json'
-        [pscustomobject]@{version=2;username='synthetic';trustedNetwork=(Network)} |
+        [pscustomobject]@{version=2;username='synthetic';trustedNetwork=(New-TestNetwork)} |
             ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $path
         $output = & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $root 'whut-net.ps1') networks -Json
         Assert-Equal $LASTEXITCODE 0
@@ -668,12 +674,14 @@ Test-Case 'CLI networks table and JSON reach stdout with isolated local state' {
     }
 }
 
-foreach ($scenario in @('removed', 'absent', 'denied', 'connect-failed')) {
+foreach ($scenario in @('removed', 'absent', 'denied', 'connect-failed', 'ambiguous')) {
     Test-Case "uninstall preserves recoverability: $scenario" {
         $savedDataDir = $Script:DataDir
         $temporaryData = Join-Path ([IO.Path]::GetTempPath()) ('whut-uninstall-test-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $temporaryData | Out-Null
         Set-Content -LiteralPath (Join-Path $temporaryData 'synthetic-state.txt') 'recoverable'
+        $stateNames=@('config.json','credential.dat','whut-net.log','auto-state.json','wutnet-hidden.vbs')
+        foreach ($name in $stateNames) { Set-Content -LiteralPath (Join-Path $temporaryData $name) 'synthetic recoverable' }
         $Script:DataDir = $temporaryData
         function New-Object {
             param($ComObject)
@@ -685,16 +693,19 @@ foreach ($scenario in @('removed', 'absent', 'denied', 'connect-failed')) {
             $fake | Add-Member ScriptMethod GetFolder { param($Path) return $this }
             $fake | Add-Member ScriptMethod DeleteTask {
                 param($Name, $Flags)
+                foreach ($file in $stateNames) { Assert-True (Test-Path -LiteralPath (Join-Path $temporaryData $file)) 'State deleted before task removal' }
                 if ($this.Scenario -eq 'absent') { throw [Runtime.InteropServices.COMException]::new('synthetic absent task', -2147024894) }
                 if ($this.Scenario -eq 'denied') { throw [Runtime.InteropServices.COMException]::new('synthetic access denied', -2147024891) }
+                if ($this.Scenario -eq 'ambiguous') { throw 'Synthetic ambiguous scheduler failure' }
             }
             return $fake
         }
         try {
             $result = Uninstall-Whut
-            if ($scenario -in @('denied', 'connect-failed')) {
+            if ($scenario -in @('denied', 'connect-failed', 'ambiguous')) {
                 Assert-Equal $result 1
                 Assert-Equal (Get-Content -LiteralPath (Join-Path $temporaryData 'synthetic-state.txt')) 'recoverable'
+                foreach ($name in $stateNames) { Assert-Equal (Get-Content -LiteralPath (Join-Path $temporaryData $name)) 'synthetic recoverable' }
             }
             else {
                 Assert-Equal $result 0
@@ -705,11 +716,14 @@ foreach ($scenario in @('removed', 'absent', 'denied', 'connect-failed')) {
             $Script:DataDir = $savedDataDir
             if (Test-Path -LiteralPath $temporaryData) {
                 Remove-Item -LiteralPath (Join-Path $temporaryData 'synthetic-state.txt')
+                foreach ($name in $stateNames) { Remove-Item -LiteralPath (Join-Path $temporaryData $name) }
                 Remove-Item -LiteralPath $temporaryData
             }
         }
     }
 }
+
+. (Join-Path $PSScriptRoot 'task-lifecycle.tests.ps1')
 
 Write-Host "$script:passed passed; $script:failed failed"
 if ($script:failed) { exit 1 }

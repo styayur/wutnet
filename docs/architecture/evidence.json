@@ -1,6 +1,6 @@
 {
-  "source_version": "v1.4.0",
-  "reviewed_on": "2026-10-11",
+  "source_version": "v1.5.0",
+  "reviewed_on": "2026-10-23",
   "diagram_source": "docs/architecture/README.md",
   "sources": [
     {
@@ -14,6 +14,18 @@
         "function Get-TrustedNetworks",
         "function Resolve-PwshExecutable",
         "function New-WhutTaskActionSpec",
+        "function New-WhutLauncherContent",
+        "function Initialize-WhutLauncher",
+        "function Test-WhutLauncher",
+        "function New-WhutTaskDefinition",
+        "shell.Run(commandLine, 0, True)",
+        "WScript.Quit result",
+        "$unlockTrigger.StateChange = 8",
+        "Microsoft-Windows-Power-Troubleshooter",
+        "$periodicTrigger.DaysInterval = 1",
+        "$periodicTrigger.Repetition.Interval = 'PT2M'",
+        "function Uninstall-Whut",
+        "function Test-WhutCommandParameters",
         "function Read-ProtectedPassword",
         "function Invoke-LoginCommand",
         "Start-Sleep -Milliseconds 750",
