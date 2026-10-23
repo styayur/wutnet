@@ -9,12 +9,12 @@ Run from PowerShell 7 on Windows; tests use synthetic credentials and mocked tra
 pwsh -NoLogo -NoProfile -File .\tests\windows.tests.ps1
 pwsh -NoLogo -NoProfile -File .\tests\check-secrets.ps1 -History
 pwsh -NoLogo -NoProfile -File .\tests\check-architecture.ps1
-Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Repository PSGallery
+Install-Module PSScriptAnalyzer -RequiredVersion 1.24.0 -Scope CurrentUser -Repository PSGallery
 pwsh -NoLogo -NoProfile -File .\tests\check-powershell.ps1
 pwsh -NoLogo -NoProfile -File .\tests\analyzer.tests.ps1
 ```
 
-Windows CI runs `Parser::ParseFile`, offline regression, secret/local-state guard and PSScriptAnalyzer **1.25.0** on PowerShell 7.2.24 and the Windows runner version. This published analyzer version is pinned in both installation and `Import-Module -RequiredVersion`; import, invocation and Error/Warning findings fail CI. The settings are repository-owned in `PSScriptAnalyzerSettings.psd1`; production copies and all test/validation scripts are analyzed. The analyzer is a development dependency only. `tests/analyzer.tests.ps1` proves the same gate exits nonzero for an intentionally invalid verb in an isolated temporary fixture.
+Windows CI runs `Parser::ParseFile`, offline regression, secret/local-state guard and PSScriptAnalyzer **1.24.0** on PowerShell 7.2.24 and the Windows runner version. This published analyzer version is pinned in both installation and `Import-Module -RequiredVersion`; import, invocation and Error/Warning findings fail CI. The settings are repository-owned in `PSScriptAnalyzerSettings.psd1`; production copies and all test/validation scripts are analyzed. The analyzer is a development dependency only. `tests/analyzer.tests.ps1` proves the same gate exits nonzero for an intentionally invalid verb in an isolated temporary fixture.
 
 The rule set covers approved verbs, reserved/unsafe parameter declarations, aliases, Invoke-Expression, credential conversions, WMI, empty catches, automatic-variable assignments, unused variables/parameters and accidental built-in shadowing. Intentional interactive `Write-Host` remains allowed; `PSUseShouldProcessForStateChangingFunctions`/ShouldProcess are deferred with Phase 3, so no WhatIf/Confirm behavior is introduced. Noun pluralization/formatting rules are not part of this behavior-focused gate. Narrow suppressions explain the compatibility-only `Automatic` fingerprint argument and the private logger's compatibility-catalog false positive. Offline test files suppress only deliberate scoped command doubles/unused mock parameters and synthetic SecureString fixture conversion. Other rules remain active.
 
