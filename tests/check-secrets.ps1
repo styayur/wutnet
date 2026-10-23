@@ -10,7 +10,7 @@ try {
     $badNames = @($tracked | Where-Object { $_ -match '(^|/)(credential\.dat|config\.json)$|\.log($|\.)' })
     if ($badNames.Count) { throw 'Local credentials/configuration/logs must not be tracked.' }
     if (@(git ls-files -- devlog).Count -gt 0) { throw 'Private devlog must not be tracked.' }
-    foreach ($path in @('credential.dat','config.json','whut-net.log','nested/credential.dat','nested/config.json','nested/test.log','devlog/private.txt')) {
+    foreach ($path in @('credential.dat','config.json','whut-net.log','wutnet-hidden.vbs','launcher-synthetic.tmp.vbs','nested/credential.dat','nested/config.json','nested/test.log','devlog/private.txt')) {
         git check-ignore --no-index --quiet -- $path
         if ($LASTEXITCODE -ne 0) { throw "Missing ignore rule: $path" }
     }

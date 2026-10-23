@@ -84,3 +84,20 @@ The maintainer supplied private `devlog` captures. They are excluded from Git be
 The log does not show a later return to WHUT-WLAN or a new scheduler test on the final release file. The earlier v1.3.2 scheduler observation remains historical evidence. Android has no new device-side WHUT evidence.
 
 Publication retains the v1.4 behavior while restoring v1.3.2 regression protections: atomic config writes, automatic v2 migration on read, exact physical bootstrap-IP matching, raw redirect checks, malformed-bootstrap rejection and block-comment/case-sensitive config parsing. It also keeps `setup -AddNetwork` and adds IDs to existing v1.3.2 v3 registrations. These release-preparation edits are covered by offline tests; they are not claimed to have been re-run against the campus portal.
+
+## Supplemental historical hidden-launcher evidence (recorded 2026-10-23)
+
+The Phase 1–2 task supplied additional prior conversation evidence concerning the fixed v1.4.0 script. This supplements, rather than rewrites, the dated records above. The precise observation date was not supplied:
+
+- The fixed script was run in `auto` mode through a manually configured `wutnet-hidden.vbs`.
+- Task Scheduler used `wscript.exe` and that VBS rather than directly starting the visible PowerShell console.
+- Manual task invocation and lock/unlock each returned `LastTaskResult = 0`.
+- The black PowerShell console no longer appeared in the tested scenario.
+
+These are maintainer-supplied historical observations, not new Codex field tests, and not proof that the historical launcher propagated every failure exit code. The manual machine-specific location is not an installer prerequisite. The managed v1.5.0 launcher is generated from the actual installation path. The supplied evidence contains no additional sleep-resume or periodic-retry acceptance.
+
+## v1.5.0 automated and safe local integration boundary (2026-10-23)
+
+The dependency-free suite checks generated quoting/UTF-16, synchronous hidden launch/exit structure, missing dependencies, launcher/write/probe failures, five-trigger definitions, repeat installation and upgrade, least privilege, command contracts and recoverable uninstall. All data, network transport and task registration are synthetic.
+
+Separate safe local integration started a generated launcher against a temporary script returning 37; WSH returned 37. Actual Windows Scheduler COM accepted the five-trigger definition using `TASK_VALIDATE_ONLY`, without registering a task. Local provider metadata confirmed Power-Troubleshooter EventID 1 describes resume from a low-power state. These checks do not perform authentication, physically unlock/sleep the device, observe a new task firing, or establish universal standby/periodic-retry acceptance. Existing field evidence does not need to be repeated to preserve it.

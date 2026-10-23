@@ -33,7 +33,7 @@ foreach ($file in $scripts) {
 }
 $scriptText = Get-Content (Join-Path $root 'whut-net.ps1') -Raw
 $version = [regex]::Match($scriptText, '\$Script:Version = ''([^'']+)''').Groups[1].Value
-if ($version -ne '1.4.0' -or -not $readme.Contains("v$version") -or $evidence.source_version -ne "v$version") {
+if ($version -notmatch '^\d+\.\d+\.\d+$' -or -not $readme.Contains("v$version") -or $evidence.source_version -ne "v$version") {
     throw 'Release version/documentation mismatch.'
 }
 if ((Get-FileHash (Join-Path $root 'whut-net.ps1')).Hash -ne

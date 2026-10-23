@@ -3,6 +3,8 @@ credential.dat
 config.json
 *.log
 *.log.*
+wutnet-hidden.vbs
+launcher-*.tmp.vbs
 
 # Editor and Windows state
 .vscode/

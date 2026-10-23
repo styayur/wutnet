@@ -20,6 +20,8 @@ WHUT currently uses **HTTP**. DPAPI protects the password **at rest only**. IP/p
 
 `help` is offline. Diagnostics/status make requests, may write logs and may migrate old config; they do not submit a password. Network removal/uninstall has no automatic undo. The published v1.4.0 uninstaller can return 0 after task-removal failure. Current source instead returns 1 and retains state on such failure; read [removal and verification](docs/WINDOWS.md#stop-automation-remove-trust-or-uninstall) before use. Preserve private backups yourself where needed.
 
+Windows v1.5.0 includes that uninstall repair and retains the managed hidden launcher on task-removal failure. Optional automation requires WSH/VBScript; the installer probes it with a harmless child command, does not change execution/application-control policy, and refuses a visible-console fallback. Launcher content contains paths and fixed arguments only; it does not contain credentials or account data.
+
 ## Android
 
 The Android APK is experimental and debug-signed. Android Keystore protects local storage, not HTTP transit; real-device WHUT authentication is unverified. See [Android security and setup](docs/ANDROID.md). Removing an app to change signing keys deletes its private credentials and registrations.

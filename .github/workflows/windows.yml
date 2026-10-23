@@ -1,15 +1,19 @@
 name: Windows PowerShell
 on:
   push:
-    branches: [main, 'fix/**', 'release/**']
-    paths: ['whut-net*.ps1', 'tests/**', '.github/workflows/windows.yml', 'README.md', 'docs/**']
+    branches: [main, 'feat/**', 'fix/**', 'release/**']
+    paths: ['whut-net*.ps1', 'tests/**', 'PSScriptAnalyzerSettings.psd1', '.github/workflows/windows.yml', 'README.md', 'CONTRIBUTING.md', 'docs/**']
   pull_request:
-    paths: ['whut-net*.ps1', 'tests/**', '.github/workflows/windows.yml', 'README.md', 'docs/**']
+    paths: ['whut-net*.ps1', 'tests/**', 'PSScriptAnalyzerSettings.psd1', '.github/workflows/windows.yml', 'README.md', 'CONTRIBUTING.md', 'docs/**']
 permissions:
   contents: read
 jobs:
   verify:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        powershell: ['7.2.24', 'runner']
     defaults:
       run:
         shell: pwsh
@@ -18,6 +22,20 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Select minimum supported PowerShell
+        if: matrix.powershell == '7.2.24'
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'pwsh-7.2.24.zip'
+          $destination = Join-Path $env:RUNNER_TEMP 'pwsh-7.2.24'
+          Invoke-WebRequest 'https://github.com/PowerShell/PowerShell/releases/download/v7.2.24/PowerShell-7.2.24-win-x64.zip' -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination
+          $destination | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Install pinned development analyzer
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.23.0 -Scope CurrentUser -Repository PSGallery -Force -ErrorAction Stop
+          Import-Module PSScriptAnalyzer -RequiredVersion 1.23.0 -ErrorAction Stop
+          Write-Host "PowerShell $($PSVersionTable.PSVersion); PSScriptAnalyzer $((Get-Module PSScriptAnalyzer).Version)"
       - name: PowerShell syntax
         run: |
           $files = @(Get-ChildItem -Filter 'whut-net*.ps1' | ForEach-Object FullName) + @(Get-ChildItem tests -Filter *.ps1 | ForEach-Object FullName)
@@ -29,5 +47,13 @@ jobs:
           }
       - name: Offline regression tests
         run: ./tests/windows.tests.ps1
+      - name: Static analysis and gate regression
+        run: |
+          ./tests/check-powershell.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Analyzer gate failed.' }
+      - name: Analyzer rejection regression
+        run: ./tests/analyzer.tests.ps1
+      - name: Local WSH and COM validation (no registered task or campus request)
+        run: ./tests/windows.integration.tests.ps1
       - name: Tracked secrets and ignored local state
         run: ./tests/check-secrets.ps1 -History
