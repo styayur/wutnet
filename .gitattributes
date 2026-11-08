@@ -6,3 +6,5 @@ android/gradlew text eol=lf
 
 # Release scripts have identical bytes in Git and downloaded assets.
 whut-net*.ps1 text eol=lf
+
+.github/workflows/*.lock.yml linguist-generated=true
