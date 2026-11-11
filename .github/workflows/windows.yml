@@ -1,5 +1,6 @@
 name: Windows PowerShell
 on:
+  workflow_dispatch:
   push:
     branches: [main, 'feat/**', 'fix/**', 'release/**']
     paths: ['whut-net*.ps1', 'tests/**', 'PSScriptAnalyzerSettings.psd1', '.github/workflows/windows.yml', 'README.md', 'CONTRIBUTING.md', 'docs/**']
