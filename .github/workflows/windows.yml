@@ -4,7 +4,8 @@ on:
     branches: [main, 'feat/**', 'fix/**', 'release/**']
     paths: ['whut-net*.ps1', 'tests/**', 'PSScriptAnalyzerSettings.psd1', '.github/workflows/**', 'README.md', 'CONTRIBUTING.md', 'docs/**']
   pull_request:
-    paths: ['whut-net*.ps1', 'tests/**', 'PSScriptAnalyzerSettings.psd1', '.github/workflows/**', 'README.md', 'CONTRIBUTING.md', 'docs/**']
+    # Both matrix checks are required by the default-branch ruleset. Filtering
+    # Android-only PRs here leaves those required checks pending forever.
 permissions:
   contents: read
 jobs:
